@@ -1511,10 +1511,10 @@ void App::on_button(int bx, int by, int button) {
             cmap_open_ = false;
             return;
         }
-        // Colorbar bound fields: click to edit min / max (type the new value;
-        // Enter applies, Esc cancels, empty entry leaves the bound unchanged).
-        if (r_cbmax_.hit(bx, by)) { editing_ = 2; edit_buf_.clear(); return; }
-        if (r_cbmin_.hit(bx, by)) { editing_ = 1; edit_buf_.clear(); return; }
+        // Colorbar bound fields: click to edit min / max. The field is prefilled
+        // with the current value (Enter applies, Esc cancels).
+        if (r_cbmax_.hit(bx, by)) { editing_ = 2; edit_buf_ = fmt_num(vmax_); return; }
+        if (r_cbmin_.hit(bx, by)) { editing_ = 1; edit_buf_ = fmt_num(vmin_); return; }
         if (editing_) commit_edit();  // clicking elsewhere commits the edit
 
         if (r_first_.hit(bx, by)) {
