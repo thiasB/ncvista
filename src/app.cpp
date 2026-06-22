@@ -432,16 +432,16 @@ void App::layout() {
     };
     for (const auto &c : cmaps_) consider("▦ " + c.name);
     consider("flip ✓");
-    consider("fixed range");
     consider("coast ✓");
     consider("ⓘ metadata");
     bw += 24;                              // horizontal padding inside the button
 
+    // The fixed/auto range toggle lives above the colour scale (see
+    // draw_colorbar), not in the toolbar.
     const double gap = 8;
     double bx = pad, by = 10, bh = toolbar_h - 20;
     r_cmap_  = {bx, by, bw, bh}; bx += bw + gap;
     r_flip_  = {bx, by, bw, bh}; bx += bw + gap;
-    r_range_ = {bx, by, bw, bh}; bx += bw + gap;
     r_coast_ = {bx, by, bw, bh}; bx += bw + gap;
     r_info_  = {bx, by, bw, bh};
 
@@ -551,8 +551,6 @@ void App::draw_toolbar() {
 
     draw_button(cr_, r_cmap_, "▦ " + cmaps_[cmap_idx_].name, false, false);
     draw_button(cr_, r_flip_, flip_y_ ? "flip ✓" : "flip", flip_y_, false);
-    draw_button(cr_, r_range_, auto_range_ ? "auto range" : "fixed range",
-                !auto_range_, false);
     draw_button(cr_, r_coast_,
                 show_coast_ ? "coast ✓" : "coast",
                 show_coast_ && geographic_, false);
@@ -1066,8 +1064,16 @@ void App::draw_coast(double ox, double oy, double s, int nx, int ny,
 
 void App::draw_colorbar() {
     const Rect &R = r_colorbar_;
-    double barx = R.x + 8, bary = R.y + 24;
-    double barw = 22, barh = R.h - 48;
+
+    // Fixed/auto range toggle above the colour scale. A check mark and accent
+    // highlight indicate that the range is fixed (auto scaling off).
+    double btn_h = 24;
+    r_range_ = {R.x + 6, R.y + 6, R.w - 12, btn_h};
+    draw_button(cr_, r_range_, auto_range_ ? "fixed" : "fixed ✓", !auto_range_, false);
+
+    const double reserve = btn_h + 14;     // vertical space taken by the toggle
+    double barx = R.x + 8, bary = R.y + 24 + reserve;
+    double barw = 22, barh = R.h - 48 - reserve;
     const Palette &cm = cmaps_[cmap_idx_];
 
     for (int i = 0; i < (int)barh; ++i) {

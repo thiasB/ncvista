@@ -35,7 +35,8 @@ coastline overlay](docs/screenshot.png)
   quick global min/max scan of the variable (sub-sampled for large files) so the
   colour scale is stable across time steps. The min and max are editable: click
   a colorbar bound field and type a new value (Enter applies, Esc cancels). The
-  range button toggles between this fixed global range and per-slice auto.
+  **fixed** button above the colour scale toggles between this fixed global
+  range and per-slice auto.
 - Missing/fill values are rendered white.
 - The window opens at a default size whose plot canvas matches a global
   longitude/latitude grid (360 × 180, a 2:1 map); it is freely resizable.
@@ -77,7 +78,7 @@ coastline overlay](docs/screenshot.png)
 | Scroll variable list | wheel over the sidebar or drag its scrollbar |
 | Choose colormap   | the colormap button (dropdown); `c` cycles |
 | Flip Y (N↕S)      | `f` or the flip button                   |
-| Auto/fixed range  | `a` or the range button                  |
+| Auto/fixed range  | `a` or the **fixed** button (above the colour scale) |
 | Edit min / max    | click a colorbar bound field, type, Enter|
 | Coastlines overlay| `l` or the coast button (geographic data)|
 | Metadata window   | `m` / `i` or the ⓘ metadata button       |
