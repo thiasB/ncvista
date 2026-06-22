@@ -52,6 +52,10 @@ coastline overlay](docs/screenshot.png)
 - **Country-borders overlay** (Natural Earth 110m), drawn as dashed lines for
   longitude/latitude fields; off by default. Toggle with the borders button or
   `b`.
+- **Map projections** for longitude/latitude fields: equirectangular (default),
+  Mollweide, Hammer and Gall-Peters (equal-area), Mercator, and Robinson. Cycle
+  with the projection button or `p`; the field is reprojected and the
+  coast/border overlays follow. Zoom/hover apply in the equirectangular view.
 - Pointer hover readout: data value (with its unit) and the coordinate-variable
   position, plus a crosshair.
 - **Time-series window**: click a grid cell in the plot to open a line chart of
@@ -96,6 +100,7 @@ coastline overlay](docs/screenshot.png)
 | Edit min / max    | click a colorbar bound field, type, Enter|
 | Coastlines overlay| `l` or the coast button (geographic data)|
 | Country borders   | `b` or the borders button (geographic data)|
+| Map projection    | `p` or the projection button (geographic data)|
 | Metadata window   | `m` / `i` or the ⓘ metadata button       |
 | Select metadata text | drag in the metadata window (copies to clipboard) |
 | Animation speed   | `+` / `-` or scroll wheel                |

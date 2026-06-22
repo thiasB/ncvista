@@ -11,6 +11,7 @@
 #include "units.hpp"
 #include "colormap.hpp"
 #include "overlay.hpp"
+#include "projection.hpp"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -175,6 +176,21 @@ private:
     bool show_coast_ = true;           // coastline overlay on by default
     bool show_borders_ = false;        // country-border overlay off by default
     bool geographic_ = false;          // current axes are lon/lat
+    int proj_idx_ = 0;                 // map projection (proj::Kind)
+
+    // Reprojected raster, rebuilt only when its inputs change (heavy: it is at
+    // display resolution, not grid resolution).
+    cairo_surface_t *proj_img_ = nullptr;
+    int proj_pj_ = -1, proj_cmap_ = -1, proj_w_ = -1, proj_h_ = -1;
+    long proj_ver_ = -1;
+    double proj_vmin_ = 0, proj_vmax_ = 0;
+    bool proj_rev_ = false;
+    bool projected() const { return geographic_ && proj_idx_ != proj::EQUIRECT; }
+    void draw_projected();
+    void draw_overlay_proj(const Coastlines &src, const RGB &core,
+                           double core_w, double halo_w, bool dashed,
+                           double ox, double oy, double dw, double dh,
+                           double hx, double hy, double lon0);
 
     // Cached vector overlay (coastlines or borders), rebuilt only when the plot
     // geometry changes — never on hover, animation or recolour.
@@ -285,7 +301,7 @@ private:
     void apply_default_size();         // size the window for a global lon/lat grid
 
     Rect r_sidebar_, r_plot_, r_colorbar_, r_toolbar_, r_header_;
-    Rect r_first_, r_play_, r_prev_, r_next_, r_cmap_, r_flip_, r_range_, r_coast_, r_borders_, r_info_;
+    Rect r_first_, r_play_, r_prev_, r_next_, r_cmap_, r_flip_, r_range_, r_coast_, r_borders_, r_proj_, r_info_;
     Rect r_cbmax_, r_cbmin_;           // editable colorbar bound fields
     Rect r_sym_;                       // symmetric-around-zero toggle
     Rect r_cmaprev_;                   // reverse-colour-scale toggle
@@ -313,9 +329,12 @@ private:
     void draw_var_tooltip();           // full name/long_name/units on hover
     void draw_button_tooltip();        // explains each toolbar / playback button
     void draw_cmap_menu();             // colour-map dropdown, when open
+    void draw_proj_menu();             // projection dropdown, when open
     void draw_wait_overlay(const std::string &msg);  // modal "please wait" popup
     bool cmap_open_ = false;           // colour-map dropdown visible
     std::vector<Rect> r_cmap_items_;   // option rows (parallel to cmaps_)
+    bool proj_open_ = false;           // projection dropdown visible
+    std::vector<Rect> r_proj_items_;   // option rows (parallel to proj::COUNT)
     void draw_plot();
     void draw_overlay(const Coastlines &src, LineOverlay &ov, const RGB &core,
                       double core_w, double halo_w, bool dashed,
@@ -501,6 +520,7 @@ void App::layout() {
     consider("↕ flip ✓");
     consider("∿ coast ✓");
     consider("╌ borders ✓");
+    consider("♁ Gall-Peters");
     consider("ⓘ metadata");
     bw += 24;                              // horizontal padding inside the button
 
@@ -512,6 +532,7 @@ void App::layout() {
     r_flip_    = {bx, by, bw, bh}; bx += bw + gap;
     r_coast_   = {bx, by, bw, bh}; bx += bw + gap;
     r_borders_ = {bx, by, bw, bh}; bx += bw + gap;
+    r_proj_    = {bx, by, bw, bh}; bx += bw + gap;
     r_info_    = {bx, by, bw, bh};
 
     r_sidebar_ = {0, toolbar_h, sidebar_w, (double)height_ - toolbar_h};
@@ -589,6 +610,7 @@ void App::render() {
     draw_sliders();
     draw_toolbar();
     draw_cmap_menu();     // dropdown overlays the frame when open
+    draw_proj_menu();
     draw_var_tooltip();   // last, so it overlays the rest of the frame
     draw_button_tooltip();
     cairo_surface_flush(back_);
@@ -634,6 +656,8 @@ void App::draw_toolbar() {
     draw_button(cr_, r_borders_,
                 show_borders_ ? "╌ borders ✓" : "╌ borders",
                 show_borders_ && geographic_, false);
+    draw_button(cr_, r_proj_, std::string("♁ ") + proj::name(proj_idx_),
+                projected(), false);
     draw_button(cr_, r_info_, "ⓘ metadata", meta_win_ != 0, false);
 
     // File name, ellipsized to the space left of the toolbar's right edge.
@@ -783,6 +807,7 @@ void App::draw_button_tooltip() {
         {&r_cmaprev_, "Reverse the colour scale"},
         {&r_coast_, "Toggle coastline overlay"},
         {&r_borders_, "Toggle country-border overlay"},
+        {&r_proj_,  "Choose map projection (geographic data)"},
         {&r_info_,  "Open the metadata window"},
     };
     const Rect *br = nullptr;
@@ -791,6 +816,7 @@ void App::draw_button_tooltip() {
         if (it.r->hit(mouse_x_, mouse_y_)) { br = it.r; desc = it.desc; break; }
     if (!desc) return;
     if (br == &r_cmap_ && cmap_open_) return;   // dropdown shows the options instead
+    if (br == &r_proj_ && proj_open_) return;
 
     double tw, th;
     text_size(cr_, desc, 12, false, tw, th);
@@ -858,6 +884,40 @@ void App::draw_cmap_menu() {
     }
 }
 
+// The projection button opens this dropdown: one row per projection, the
+// current one highlighted (mirrors the colour-map picker).
+void App::draw_proj_menu() {
+    r_proj_items_.clear();
+    if (!proj_open_) return;
+
+    const double rowh = 26;
+    double mw = std::max(r_proj_.w, 150.0);
+    double mx = std::clamp(r_proj_.x, 6.0, std::max(6.0, width_ - mw - 6));
+    double my = r_proj_.y + r_proj_.h + 4;
+    double mh = rowh * proj::COUNT + 6;
+
+    rounded_rect(cr_, mx, my, mw, mh, 6);
+    set_color(cr_, COL_PANEL, 0.98);
+    cairo_fill_preserve(cr_);
+    set_color(cr_, COL_BORDER);
+    cairo_set_line_width(cr_, 1);
+    cairo_stroke(cr_);
+
+    for (int i = 0; i < proj::COUNT; ++i) {
+        Rect r{mx, my + 3 + (double)i * rowh, mw, rowh};
+        r_proj_items_.push_back(r);
+        bool sel = (i == proj_idx_);
+        bool hov = r.hit(mouse_x_, mouse_y_);
+        if (sel || hov) {
+            rounded_rect(cr_, r.x + 3, r.y + 1, r.w - 6, r.h - 2, 4);
+            set_color(cr_, sel ? COL_ACCENT_D : COL_PANEL2);
+            cairo_fill(cr_);
+        }
+        draw_text(cr_, proj::name(i), r.x + 12, r.y + (rowh - 16) / 2,
+                  sel ? RGB{1, 1, 1} : COL_TEXT, 13, sel);
+    }
+}
+
 // A modal "please wait" popup drawn over the last frame and pushed straight to
 // the screen, so the user gets feedback before a long, blocking read. The next
 // render() repaints the frame and thereby clears it.
@@ -911,6 +971,9 @@ void App::draw_plot() {
         draw_plot_line();
         return;
     }
+
+    // Non-equirectangular projection: reproject the field (no zoom/hover/click).
+    if (projected()) { draw_projected(); return; }
 
     if (!slice_.valid || slice_.nx <= 0 || slice_.ny <= 0) {
         draw_text(cr_, "no data", R.x + R.w / 2 - 30, R.y + R.h / 2, COL_TEXT_DIM, 14);
@@ -1167,6 +1230,133 @@ void App::draw_overlay(const Coastlines &src, LineOverlay &ov, const RGB &core,
     cairo_paint(cr_);
 }
 
+// Render the field through a non-equirectangular projection by inverse-mapping
+// each output pixel to a (lon, lat) and sampling the nearest grid cell.
+void App::draw_projected() {
+    const Rect &R = r_plot_;
+    plot_s_ = 0; plot_nx_ = plot_ny_ = 0;   // no field click/hover in projected mode
+    if (!slice_.valid || slice_.nx <= 0 || slice_.ny <= 0 ||
+        xcoord_.size() < 2 || ycoord_.size() < 2)
+        return;
+
+    const int nx = slice_.nx, ny = slice_.ny;
+    double hx, hy; proj::extent(proj_idx_, hx, hy);
+    const double aspect = hx / hy;
+
+    // Fit the projection's 2:1 box into the plot, preserving aspect.
+    double avail_w = R.w - 16, avail_h = R.h - 16;
+    double dw = avail_w, dh = dw / aspect;
+    if (dh > avail_h) { dh = avail_h; dw = dh * aspect; }
+    double ox = R.x + (R.w - dw) / 2, oy = R.y + (R.h - dh) / 2;
+    int iw = std::max(1, (int)std::lround(dw)), ih = std::max(1, (int)std::lround(dh));
+
+    const double xc0 = xcoord_.front(), xcn = xcoord_.back();
+    const double yc0 = ycoord_.front(), ycn = ycoord_.back();
+    const double xlo = std::min(xc0, xcn), xhi = std::max(xc0, xcn);
+    const double lon0 = 0.5 * (xc0 + xcn);   // central meridian
+    const double DEG = M_PI / 180.0;
+
+    bool stale = !proj_img_ || proj_pj_ != proj_idx_ || proj_cmap_ != cmap_idx_ ||
+                 proj_ver_ != slice_version_ || proj_vmin_ != vmin_ ||
+                 proj_vmax_ != vmax_ || proj_rev_ != reversed_ ||
+                 proj_w_ != iw || proj_h_ != ih;
+    if (stale) {
+        if (proj_img_) cairo_surface_destroy(proj_img_);
+        proj_img_ = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw, ih);
+        unsigned char *px = cairo_image_surface_get_data(proj_img_);
+        int stride = cairo_image_surface_get_stride(proj_img_);
+        const Palette &cm = cmaps_[cmap_idx_];
+        double span = (vmax_ > vmin_) ? (vmax_ - vmin_) : 1.0;
+        for (int j = 0; j < ih; ++j) {
+            uint32_t *row = (uint32_t *)(px + j * stride);
+            double Y = hy - (j + 0.5) / ih * 2 * hy;
+            for (int i = 0; i < iw; ++i) {
+                double X = -hx + (i + 0.5) / iw * 2 * hx;
+                double lam, phi;
+                if (!proj::inverse(proj_idx_, X, Y, lam, phi)) { row[i] = 0; continue; }
+                double lon = lon0 + lam / DEG, lat = phi / DEG;
+                // Wrap longitude into the data's range (global grids).
+                double L = std::fmod(lon - xlo, 360.0); if (L < 0) L += 360.0; L += xlo;
+                if (L > xhi) { double a = L - 360.0; if (a >= xlo) L = a; }
+                double fc = (L - xc0) * (nx - 1) / (xcn - xc0);
+                double fr = (lat - yc0) * (ny - 1) / (ycn - yc0);
+                int ci = (int)std::lround(fc), ri = (int)std::lround(fr);
+                if (ci < 0 || ci >= nx || ri < 0 || ri >= ny) { row[i] = 0; continue; }
+                double val = slice_.data[(size_t)ri * nx + ci];
+                if (std::isnan(val)) { row[i] = 0xFFFFFFFFu; continue; }
+                double t = (val - vmin_) / span;
+                if (reversed_) t = 1.0 - t;
+                uint8_t r, g, b; cm.sample(t, r, g, b);
+                row[i] = (0xFFu << 24) | (r << 16) | (g << 8) | b;
+            }
+        }
+        cairo_surface_mark_dirty(proj_img_);
+        proj_pj_ = proj_idx_; proj_cmap_ = cmap_idx_; proj_ver_ = slice_version_;
+        proj_vmin_ = vmin_; proj_vmax_ = vmax_; proj_rev_ = reversed_;
+        proj_w_ = iw; proj_h_ = ih;
+    }
+
+    cairo_set_source_surface(cr_, proj_img_, ox, oy);
+    cairo_pattern_set_filter(cairo_get_source(cr_), CAIRO_FILTER_NEAREST);
+    cairo_paint(cr_);
+
+    if (show_coast_ && coast_.loaded)
+        draw_overlay_proj(coast_, {0.05, 0.05, 0.07}, 1.1, 2.4, false,
+                          ox, oy, dw, dh, hx, hy, lon0);
+    if (show_borders_ && borders_.loaded)
+        draw_overlay_proj(borders_, {0.45, 0.10, 0.10}, 1.0, 2.0, true,
+                          ox, oy, dw, dh, hx, hy, lon0);
+}
+
+// Stroke a polyline overlay through the current projection, breaking segments
+// that cross the antimeridian or jump across the map.
+void App::draw_overlay_proj(const Coastlines &src, const RGB &core,
+                            double core_w, double halo_w, bool dashed,
+                            double ox, double oy, double dw, double dh,
+                            double hx, double hy, double lon0) {
+    const double DEG = M_PI / 180.0;
+    auto project = [&](double lon, double lat, double &px, double &py) {
+        double lam = lon - lon0;
+        while (lam > 180) lam -= 360;
+        while (lam < -180) lam += 360;
+        double X, Y;
+        proj::forward(proj_idx_, lam * DEG, lat * DEG, X, Y);
+        px = ox + (X + hx) / (2 * hx) * dw;
+        py = oy + (hy - Y) / (2 * hy) * dh;
+    };
+    const double dashes[2] = {4.0, 3.0};
+    cairo_save(cr_);
+    rounded_rect(cr_, r_plot_.x + 2, r_plot_.y + 2, r_plot_.w - 4, r_plot_.h - 4, 6);
+    cairo_clip(cr_);
+    cairo_set_line_join(cr_, CAIRO_LINE_JOIN_ROUND);
+    cairo_set_line_cap(cr_, CAIRO_LINE_CAP_ROUND);
+    if (dashed) cairo_set_dash(cr_, dashes, 2, 0.0);
+
+    auto build = [&]() {
+        for (const auto &line : src.lines) {
+            bool pen = false;
+            double plon = 0;
+            for (const auto &pt : line) {
+                double lon = pt.first, lat = pt.second;
+                double px, py; project(lon, lat, px, py);
+                if (pen && std::fabs(lon - plon) > 90.0) pen = false;  // antimeridian
+                if (pen) cairo_line_to(cr_, px, py);
+                else cairo_move_to(cr_, px, py);
+                pen = true; plon = lon;
+            }
+        }
+    };
+    build();
+    cairo_set_source_rgba(cr_, 1, 1, 1, 0.45);
+    cairo_set_line_width(cr_, halo_w);
+    cairo_stroke(cr_);
+    build();
+    cairo_set_source_rgba(cr_, core.r, core.g, core.b, 0.9);
+    cairo_set_line_width(cr_, core_w);
+    cairo_stroke(cr_);
+    cairo_restore(cr_);
+}
+
 void App::draw_colorbar() {
     const Rect &R = r_colorbar_;
     // No colour scale for the 1-D line plot; drop the toggle hit-rects too.
@@ -1307,6 +1497,13 @@ void App::on_button(int bx, int by, int button) {
         return;
     }
     if (button == Button1) {
+        // Projection dropdown is modal: a click either picks a row or closes it.
+        if (proj_open_) {
+            for (size_t i = 0; i < r_proj_items_.size(); ++i)
+                if (r_proj_items_[i].hit(bx, by)) { proj_idx_ = (int)i; proj_open_ = false; return; }
+            proj_open_ = false;
+            return;
+        }
         // Colour-map dropdown is modal: a click either picks a row or closes it.
         if (cmap_open_) {
             for (size_t i = 0; i < r_cmap_items_.size(); ++i)
@@ -1328,7 +1525,7 @@ void App::on_button(int bx, int by, int button) {
         if (r_play_.hit(bx, by)) { playing_ = !playing_; last_frame_ = now_seconds(); return; }
         if (r_prev_.hit(bx, by)) { playing_ = false; step_anim(-1); return; }
         if (r_next_.hit(bx, by)) { playing_ = false; step_anim(+1); return; }
-        if (r_cmap_.hit(bx, by)) { cmap_open_ = true; return; }
+        if (r_cmap_.hit(bx, by)) { cmap_open_ = true; proj_open_ = false; return; }
         if (r_flip_.hit(bx, by)) { flip_y_ = !flip_y_; return; }
         if (r_range_.hit(bx, by)) {
             auto_range_ = !auto_range_;
@@ -1355,6 +1552,7 @@ void App::on_button(int bx, int by, int button) {
         if (r_cmaprev_.hit(bx, by)) { reversed_ = !reversed_; return; }
         if (r_coast_.hit(bx, by)) { show_coast_ = !show_coast_; return; }
         if (r_borders_.hit(bx, by)) { show_borders_ = !show_borders_; return; }
+        if (r_proj_.hit(bx, by)) { proj_open_ = true; cmap_open_ = false; return; }
         if (r_info_.hit(bx, by)) {
             if (meta_win_) close_meta_window();
             else open_meta_window();
@@ -1499,6 +1697,7 @@ void App::on_key(KeySym ks) {
         case XK_f: flip_y_ = !flip_y_; break;
         case XK_l: show_coast_ = !show_coast_; break;
         case XK_b: show_borders_ = !show_borders_; break;
+        case XK_p: proj_idx_ = (proj_idx_ + 1) % proj::COUNT; break;
         case XK_a:
             auto_range_ = !auto_range_;
             if (auto_range_) {
@@ -2263,6 +2462,7 @@ int App::run() {
     close_meta_window();
     close_ts_window();
     if (data_img_) cairo_surface_destroy(data_img_);
+    if (proj_img_) cairo_surface_destroy(proj_img_);
     if (coast_ov_.img) cairo_surface_destroy(coast_ov_.img);
     if (borders_ov_.img) cairo_surface_destroy(borders_ov_.img);
     cairo_destroy(cr_);
