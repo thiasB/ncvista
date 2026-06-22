@@ -19,9 +19,13 @@ struct NcVar {
     std::string units;           // raw "units" attribute (may be empty)
     std::string long_name;       // "long_name" or "standard_name" attribute
     bool has_fill = false;
-    double fill = 0.0;
+    double fill = 0.0;           // in packed/stored units (compared before unpacking)
     bool numeric = false;        // can be read as double and plotted
     bool aux = false;            // supporting var (bounds, coords, grid_mapping…)
+    // CF packing: physical = stored * scale + offset (identity when absent).
+    bool packed = false;
+    double scale = 1.0;
+    double offset = 0.0;
 };
 
 // A 2-D slice ready for rendering. data has ny*nx values, row-major (y outer).

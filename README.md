@@ -69,6 +69,9 @@ coastline overlay](docs/screenshot.png)
   CF `360_day`, `noleap`/`365_day` and `all_leap`/`366_day` calendars.
 - A terminal notice is printed while the global min/max range of a large variable
   is being scanned (this runs before the window is mapped at start-up).
+- CF packing is unpacked on read: stored values are converted to physical units
+  via `scale_factor` / `add_offset`, so the field, the value range and the colour
+  scale are all in physical units (fill values are detected before unpacking).
 - `_FillValue` / `missing_value` are rendered white.
 
 ## Keyboard / mouse

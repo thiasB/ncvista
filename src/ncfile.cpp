@@ -86,6 +86,16 @@ bool NcFile::open(const std::string &path, std::string &err) {
             var.has_fill = true; var.fill = fv;
         }
 
+        // CF packing attributes. The netCDF C library does not apply these, so
+        // we unpack manually on read: physical = stored * scale_factor + add_offset.
+        double sf, ao;
+        if (nc_get_att_double(ncid_, v, "scale_factor", &sf) == NC_NOERR) {
+            var.scale = sf; var.packed = true;
+        }
+        if (nc_get_att_double(ncid_, v, "add_offset", &ao) == NC_NOERR) {
+            var.offset = ao; var.packed = true;
+        }
+
         vars_.push_back(std::move(var));
     }
 
@@ -339,6 +349,7 @@ bool NcFile::var_minmax(const NcVar &v, double &lo, double &hi) const {
             (val == v.fill || std::fabs(val - v.fill) <= 1e-6 * std::fabs(v.fill)))
             continue;
         if (std::fabs(val) >= 9.0e36) continue;
+        if (v.packed) val = val * v.scale + v.offset;   // unpack to physical units
         if (val < mn) mn = val;
         if (val > mx) mx = val;
     }
@@ -382,7 +393,8 @@ std::vector<double> NcFile::read_series(const NcVar &v,
             (val == v.fill || std::fabs(val - v.fill) <= 1e-6 * std::fabs(v.fill))) {
             val = std::numeric_limits<double>::quiet_NaN(); continue;
         }
-        if (std::fabs(val) >= 9.0e36) val = std::numeric_limits<double>::quiet_NaN();
+        if (std::fabs(val) >= 9.0e36) { val = std::numeric_limits<double>::quiet_NaN(); continue; }
+        if (v.packed) val = val * v.scale + v.offset;   // unpack to physical units
     }
     return out;
 }
@@ -432,6 +444,7 @@ Slice NcFile::read_slice(const NcVar &v, const std::vector<size_t> &fixed) const
             val = std::numeric_limits<double>::quiet_NaN();
             continue;
         }
+        if (v.packed) val = val * v.scale + v.offset;   // unpack to physical units
         if (val < lo) lo = val;
         if (val > hi) hi = val;
     }
