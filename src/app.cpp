@@ -520,7 +520,7 @@ void App::layout() {
     consider("flip ✓");
     consider("coast ✓");
     consider("borders ✓");
-    consider("Gall-Peters");
+    consider("♁ Gall-Peters");
     consider("ⓘ metadata");
     bw += 24;                              // horizontal padding inside the button
 
@@ -656,7 +656,8 @@ void App::draw_toolbar() {
     draw_button(cr_, r_borders_,
                 show_borders_ ? "borders ✓" : "borders",
                 show_borders_ && geographic_, false);
-    draw_button(cr_, r_proj_, proj::name(proj_idx_), projected(), false);
+    draw_button(cr_, r_proj_, std::string("♁ ") + proj::name(proj_idx_),
+                projected(), false);
     draw_button(cr_, r_info_, "ⓘ metadata", meta_win_ != 0, false);
 
     // File name, ellipsized to the space left of the toolbar's right edge.
