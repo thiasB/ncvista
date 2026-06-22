@@ -47,6 +47,9 @@ coastline overlay](docs/screenshot.png)
 - **Coastlines overlay** (Natural Earth 110m) for longitude/latitude fields,
   auto-detected from coordinate units and enabled by default; handles 0–360°
   and −180–180° longitude conventions. Toggle with the coast button or `l`.
+- **Country-borders overlay** (Natural Earth 110m), drawn as dashed lines for
+  longitude/latitude fields; off by default. Toggle with the borders button or
+  `b`.
 - Pointer hover readout: data value (with its unit) and the coordinate-variable
   position, plus a crosshair.
 - **Time-series window**: click a grid cell in the plot to open a line chart of
@@ -90,6 +93,7 @@ coastline overlay](docs/screenshot.png)
 | Reverse colours   | `r` or the **reverse** button            |
 | Edit min / max    | click a colorbar bound field, type, Enter|
 | Coastlines overlay| `l` or the coast button (geographic data)|
+| Country borders   | `b` or the borders button (geographic data)|
 | Metadata window   | `m` / `i` or the ⓘ metadata button       |
 | Select metadata text | drag in the metadata window (copies to clipboard) |
 | Animation speed   | `+` / `-` or scroll wheel                |
@@ -176,19 +180,21 @@ gcc gen_test.c -I"$PREFIX/include" -L"$PREFIX/lib" \
 ./build/ncvista sample.nc
 ```
 
-## Coastline data
+## Coastline / border data
 
-The overlay reads `coastlines.bin`, a compact little-endian file of (lon, lat)
-polylines shipped with the project (Natural Earth 110m coastline, derived from
-public-domain data). At runtime it is located via, in order: `$NCVISTA_COAST`,
-next to the executable, `<prefix>/share/ncvista/coastlines.bin`, then the
-build-time source path.
+The overlays read `coastlines.bin` and `borders.bin`, compact little-endian
+files of (lon, lat) polylines shipped with the project (Natural Earth 110m
+coastline and admin-0 boundary lines, derived from public-domain data). At
+runtime each is located via, in order: an environment override (`$NCVISTA_COAST`
+/ `$NCVISTA_BORDERS`), next to the executable, `<prefix>/share/ncvista/`, then
+the build-time source path.
 
-To regenerate it from a Natural Earth shapefile (the generator uses cartopy or
+To regenerate them from Natural Earth shapefiles (the generator uses cartopy or
 pyshp if present, otherwise a built-in standard-library reader):
 
 ```sh
-python3 scripts/make_coastlines.py ne_110m_coastline.shp coastlines.bin
+python3 scripts/make_overlays.py ne_110m_coastline.shp coastlines.bin
+python3 scripts/make_overlays.py ne_110m_admin_0_boundary_lines_land.shp borders.bin
 ```
 
 ## Source layout
@@ -213,7 +219,8 @@ python3 scripts/make_coastlines.py ne_110m_coastline.shp coastlines.bin
 
 Released under the [MIT License](LICENSE).
 
-The bundled `coastlines.bin` is derived from [Natural Earth](https://www.naturalearthdata.com/)
-vector data, which is in the public domain. ncvista links the netCDF C library
+The bundled `coastlines.bin` and `borders.bin` are derived from
+[Natural Earth](https://www.naturalearthdata.com/) vector data, which is in the
+public domain. ncvista links the netCDF C library
 and udunits2 (BSD-style licenses) and Cairo / Pango (LGPL/MPL); these are not
 distributed with the source.

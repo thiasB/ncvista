@@ -15,6 +15,8 @@ struct Coastlines {
 // if the file is missing or malformed.
 bool load_coastlines(const std::string &path, Coastlines &out);
 
-// Best-effort resolution of the data file: $NCVISTA_COAST, then locations
-// relative to the executable, then the compiled-in install/source defaults.
+// Best-effort resolution of the data files: an environment override, then
+// locations relative to the executable, then the compiled-in install/source
+// defaults. Borders use the same binary format as coastlines.
 std::string default_coastline_path();
+std::string default_borders_path();

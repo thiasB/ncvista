@@ -10,7 +10,7 @@
 #include "ncfile.hpp"
 #include "units.hpp"
 #include "colormap.hpp"
-#include "coastline.hpp"
+#include "overlay.hpp"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -136,6 +136,7 @@ public:
     App(NcFile &nc, Units &units) : nc_(nc), units_(units) {
         cmaps_ = builtin_colormaps();
         load_coastlines(default_coastline_path(), coast_);
+        load_coastlines(default_borders_path(), borders_);   // same binary format
         if (!nc_.displayable().empty()) select_var(nc_.displayable().front());
     }
 
@@ -170,16 +171,20 @@ private:
     bool img_rev_ = false;
 
     std::vector<double> ycoord_, xcoord_;
-    Coastlines coast_;
-    bool show_coast_ = true;           // overlay on by default (geographic data)
+    Coastlines coast_, borders_;
+    bool show_coast_ = true;           // coastline overlay on by default
+    bool show_borders_ = false;        // country-border overlay off by default
     bool geographic_ = false;          // current axes are lon/lat
 
-    // Cached coastline overlay, rebuilt only when the plot geometry changes
-    // (resize or variable switch) — never on hover, animation or recolour.
-    cairo_surface_t *coast_img_ = nullptr;
-    double coast_s_ = -1, coast_vx0_ = -1, coast_vy0_ = -1, coast_vw_ = -1, coast_vh_ = -1;
-    int coast_nx_ = -1, coast_ny_ = -1, coast_var_ = -1;
-    bool coast_flip_ = false;
+    // Cached vector overlay (coastlines or borders), rebuilt only when the plot
+    // geometry changes — never on hover, animation or recolour.
+    struct LineOverlay {
+        cairo_surface_t *img = nullptr;
+        double s = -1, vx0 = -1, vy0 = -1, vw = -1, vh = -1;
+        int nx = -1, ny = -1, var = -1;
+        bool flip = false;
+    };
+    LineOverlay coast_ov_, borders_ov_;
     bool playing_ = false;
     double last_frame_ = 0;
     double fps_ = 4.0;
@@ -265,7 +270,7 @@ private:
     void apply_default_size();         // size the window for a global lon/lat grid
 
     Rect r_sidebar_, r_plot_, r_colorbar_, r_toolbar_, r_header_;
-    Rect r_first_, r_play_, r_prev_, r_next_, r_cmap_, r_flip_, r_range_, r_coast_, r_info_;
+    Rect r_first_, r_play_, r_prev_, r_next_, r_cmap_, r_flip_, r_range_, r_coast_, r_borders_, r_info_;
     Rect r_cbmax_, r_cbmin_;           // editable colorbar bound fields
     Rect r_sym_;                       // symmetric-around-zero toggle
     Rect r_cmaprev_;                   // reverse-colour-scale toggle
@@ -297,8 +302,10 @@ private:
     bool cmap_open_ = false;           // colour-map dropdown visible
     std::vector<Rect> r_cmap_items_;   // option rows (parallel to cmaps_)
     void draw_plot();
-    void draw_coast(double ox, double oy, double s, int nx, int ny,
-                    double vx0, double vy0, double vw, double vh);
+    void draw_overlay(const Coastlines &src, LineOverlay &ov, const RGB &core,
+                      double core_w, double halo_w, bool dashed,
+                      double ox, double oy, double s, int nx, int ny,
+                      double vx0, double vy0, double vw, double vh);
     void draw_colorbar();
     void draw_sliders();
 
@@ -454,6 +461,7 @@ void App::layout() {
     for (const auto &c : cmaps_) consider("▦ " + c.name);
     consider("flip ✓");
     consider("coast ✓");
+    consider("borders ✓");
     consider("ⓘ metadata");
     bw += 24;                              // horizontal padding inside the button
 
@@ -461,10 +469,11 @@ void App::layout() {
     // draw_colorbar), not in the toolbar.
     const double gap = 8;
     double bx = pad, by = 10, bh = toolbar_h - 20;
-    r_cmap_  = {bx, by, bw, bh}; bx += bw + gap;
-    r_flip_  = {bx, by, bw, bh}; bx += bw + gap;
-    r_coast_ = {bx, by, bw, bh}; bx += bw + gap;
-    r_info_  = {bx, by, bw, bh};
+    r_cmap_    = {bx, by, bw, bh}; bx += bw + gap;
+    r_flip_    = {bx, by, bw, bh}; bx += bw + gap;
+    r_coast_   = {bx, by, bw, bh}; bx += bw + gap;
+    r_borders_ = {bx, by, bw, bh}; bx += bw + gap;
+    r_info_    = {bx, by, bw, bh};
 
     r_sidebar_ = {0, toolbar_h, sidebar_w, (double)height_ - toolbar_h};
 
@@ -575,6 +584,9 @@ void App::draw_toolbar() {
     draw_button(cr_, r_coast_,
                 show_coast_ ? "coast ✓" : "coast",
                 show_coast_ && geographic_, false);
+    draw_button(cr_, r_borders_,
+                show_borders_ ? "borders ✓" : "borders",
+                show_borders_ && geographic_, false);
     draw_button(cr_, r_info_, "ⓘ metadata", meta_win_ != 0, false);
 
     // File name, ellipsized to the space left of the toolbar's right edge.
@@ -723,6 +735,7 @@ void App::draw_button_tooltip() {
         {&r_sym_,   "Symmetric colour scale around zero (±max|value|)"},
         {&r_cmaprev_, "Reverse the colour scale"},
         {&r_coast_, "Toggle coastline overlay"},
+        {&r_borders_, "Toggle country-border overlay"},
         {&r_info_,  "Open the metadata window"},
     };
     const Rect *br = nullptr;
@@ -918,9 +931,16 @@ void App::draw_plot() {
     cairo_paint(cr_);
     cairo_restore(cr_);
 
-    // coastline overlay
-    if (show_coast_ && geographic_ && coast_.loaded)
-        draw_coast(ox, oy, s, nx, ny, vx0, vy0, vw, vh);
+    // geographic overlays: coastlines (solid, near-black) and country borders
+    // (dashed, dark red).
+    if (geographic_) {
+        if (show_coast_ && coast_.loaded)
+            draw_overlay(coast_, coast_ov_, {0.05, 0.05, 0.07}, 1.1, 2.4, false,
+                         ox, oy, s, nx, ny, vx0, vy0, vw, vh);
+        if (show_borders_ && borders_.loaded)
+            draw_overlay(borders_, borders_ov_, {0.45, 0.10, 0.10}, 1.0, 2.0, true,
+                         ox, oy, s, nx, ny, vx0, vy0, vw, vh);
+    }
 
     // Pan scrollbars along the image edges when zoomed; their thumbs show the
     // visible window's position within the full field and can be dragged.
@@ -995,8 +1015,10 @@ void App::draw_plot() {
     }
 }
 
-void App::draw_coast(double ox, double oy, double s, int nx, int ny,
-                     double vx0, double vy0, double vw, double vh) {
+void App::draw_overlay(const Coastlines &src, LineOverlay &ov, const RGB &core,
+                       double core_w, double halo_w, bool dashed,
+                       double ox, double oy, double s, int nx, int ny,
+                       double vx0, double vy0, double vw, double vh) {
     const int nxc = (int)xcoord_.size(), nyc = (int)ycoord_.size();
     if (nxc < 2 || nyc < 2) return;
 
@@ -1008,14 +1030,14 @@ void App::draw_coast(double ox, double oy, double s, int nx, int ny,
 
     // Rebuild the cached overlay only when the geometry changes. Hover,
     // animation, recolour and range edits all reuse the same bitmap.
-    bool stale = !coast_img_ || coast_s_ != s || coast_nx_ != nx ||
-                 coast_ny_ != ny || coast_flip_ != flip_y_ || coast_var_ != cur_var_ ||
-                 coast_vx0_ != vx0 || coast_vy0_ != vy0 ||
-                 coast_vw_ != vw || coast_vh_ != vh;
+    bool stale = !ov.img || ov.s != s || ov.nx != nx ||
+                 ov.ny != ny || ov.flip != flip_y_ || ov.var != cur_var_ ||
+                 ov.vx0 != vx0 || ov.vy0 != vy0 ||
+                 ov.vw != vw || ov.vh != vh;
     if (stale) {
-        if (coast_img_) cairo_surface_destroy(coast_img_);
-        coast_img_ = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw, ih);
-        cairo_t *tcr = cairo_create(coast_img_);
+        if (ov.img) cairo_surface_destroy(ov.img);
+        ov.img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw, ih);
+        cairo_t *tcr = cairo_create(ov.img);
 
         const double xc0 = xcoord_.front(), xcn = xcoord_.back();
         const double yc0 = ycoord_.front(), ycn = ycoord_.back();
@@ -1044,10 +1066,10 @@ void App::draw_coast(double ox, double oy, double s, int nx, int ny,
         cairo_set_line_cap(tcr, CAIRO_LINE_CAP_ROUND);
         const double maxjump = dw * 0.5;       // suppress antimeridian wrap-arounds
 
-        // Build the path once, decimating points that fall on the same pixel
-        // (50m data is far denser than the screen), then stroke it twice.
+        // Build the path once, decimating points that fall on the same pixel,
+        // then stroke it twice (halo + core).
         auto build_path = [&]() {
-            for (const auto &line : coast_.lines) {
+            for (const auto &line : src.lines) {
                 bool pen = false;
                 double lx = 0, ly = 0;
                 for (const auto &pt : line) {
@@ -1068,23 +1090,26 @@ void App::draw_coast(double ox, double oy, double s, int nx, int ny,
             }
         };
 
+        const double dashes[2] = {4.0, 3.0};
+        if (dashed) cairo_set_dash(tcr, dashes, 2, 0.0);
+
         build_path();
         cairo_set_source_rgba(tcr, 1, 1, 1, 0.45);   // light halo
-        cairo_set_line_width(tcr, 2.4);
+        cairo_set_line_width(tcr, halo_w);
         cairo_stroke(tcr);
         build_path();
-        cairo_set_source_rgba(tcr, 0.05, 0.05, 0.07, 0.9);  // dark core
-        cairo_set_line_width(tcr, 1.1);
+        cairo_set_source_rgba(tcr, core.r, core.g, core.b, 0.9);  // coloured core
+        cairo_set_line_width(tcr, core_w);
         cairo_stroke(tcr);
-        cairo_surface_flush(coast_img_);
+        cairo_surface_flush(ov.img);
         cairo_destroy(tcr);
 
-        coast_s_ = s; coast_nx_ = nx; coast_ny_ = ny;
-        coast_flip_ = flip_y_; coast_var_ = cur_var_;
-        coast_vx0_ = vx0; coast_vy0_ = vy0; coast_vw_ = vw; coast_vh_ = vh;
+        ov.s = s; ov.nx = nx; ov.ny = ny;
+        ov.flip = flip_y_; ov.var = cur_var_;
+        ov.vx0 = vx0; ov.vy0 = vy0; ov.vw = vw; ov.vh = vh;
     }
 
-    cairo_set_source_surface(cr_, coast_img_, ox, oy);
+    cairo_set_source_surface(cr_, ov.img, ox, oy);
     cairo_paint(cr_);
 }
 
@@ -1269,6 +1294,7 @@ void App::on_button(int bx, int by, int button) {
         }
         if (r_cmaprev_.hit(bx, by)) { reversed_ = !reversed_; return; }
         if (r_coast_.hit(bx, by)) { show_coast_ = !show_coast_; return; }
+        if (r_borders_.hit(bx, by)) { show_borders_ = !show_borders_; return; }
         if (r_info_.hit(bx, by)) {
             if (meta_win_) close_meta_window();
             else open_meta_window();
@@ -1412,6 +1438,7 @@ void App::on_key(KeySym ks) {
         case XK_c: cmap_idx_ = (cmap_idx_ + 1) % cmaps_.size(); break;
         case XK_f: flip_y_ = !flip_y_; break;
         case XK_l: show_coast_ = !show_coast_; break;
+        case XK_b: show_borders_ = !show_borders_; break;
         case XK_a:
             auto_range_ = !auto_range_;
             if (auto_range_) {
@@ -2162,7 +2189,8 @@ int App::run() {
     close_meta_window();
     close_ts_window();
     if (data_img_) cairo_surface_destroy(data_img_);
-    if (coast_img_) cairo_surface_destroy(coast_img_);
+    if (coast_ov_.img) cairo_surface_destroy(coast_ov_.img);
+    if (borders_ov_.img) cairo_surface_destroy(borders_ov_.img);
     cairo_destroy(cr_);
     cairo_surface_destroy(back_);
     cairo_destroy(front_cr_);

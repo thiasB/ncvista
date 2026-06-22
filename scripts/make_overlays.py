@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Generate coastlines.bin for ncvista from a Natural Earth coastline shapefile.
+"""Generate ncvista overlay files (coastlines.bin / borders.bin) from a Natural
+Earth line shapefile.
 
 The viewer reads a simple little-endian binary format:
     int32  n_polylines
@@ -8,9 +9,11 @@ The viewer reads a simple little-endian binary format:
         repeat n_points: float32 lon, float32 lat   (lon in [-180, 180])
 
 Usage:
-    # 1) obtain the shapefile (e.g. Natural Earth 110m physical coastline):
+    # 1) obtain the shapefile, e.g.:
     #    ne_110m_coastline.shp/.shx/.dbf
-    # 2) python3 make_coastlines.py ne_110m_coastline.shp coastlines.bin
+    #    ne_110m_admin_0_boundary_lines_land.shp/.shx/.dbf
+    # 2) python3 make_overlays.py ne_110m_coastline.shp coastlines.bin
+    #    python3 make_overlays.py ne_110m_admin_0_boundary_lines_land.shp borders.bin
 
 Uses a shapefile reader if available (cartopy or pyshp); otherwise falls back to
 a small built-in parser that needs only the Python standard library.

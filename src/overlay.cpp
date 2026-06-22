@@ -1,4 +1,4 @@
-#include "coastline.hpp"
+#include "overlay.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -60,23 +60,53 @@ static bool exists(const std::string &p) {
     return access(p.c_str(), R_OK) == 0;
 }
 
-std::string default_coastline_path() {
-    if (const char *env = std::getenv("NCVISTA_COAST"))
-        if (exists(env)) return env;
+// Resolve a data file by basename: an env override, then paths relative to the
+// executable, then the compiled-in install/source defaults.
+static std::string resolve_data(const char *env, const char *base,
+                                const char *install, const char *src) {
+    if (env)
+        if (const char *e = std::getenv(env))
+            if (exists(e)) return e;
 
     std::string dir = exe_dir();
     std::vector<std::string> cands;
     if (!dir.empty()) {
-        cands.push_back(dir + "/coastlines.bin");
-        cands.push_back(dir + "/../share/ncvista/coastlines.bin");
+        cands.push_back(dir + "/" + base);
+        cands.push_back(dir + "/../share/ncvista/" + base);
     }
-#ifdef NCVISTA_COAST_INSTALL
-    cands.push_back(NCVISTA_COAST_INSTALL);
-#endif
-#ifdef NCVISTA_COAST_SRC
-    cands.push_back(NCVISTA_COAST_SRC);
-#endif
+    if (install && *install) cands.push_back(install);
+    if (src && *src) cands.push_back(src);
     for (const auto &c : cands)
         if (exists(c)) return c;
     return {};
+}
+
+std::string default_coastline_path() {
+    return resolve_data("NCVISTA_COAST", "coastlines.bin",
+#ifdef NCVISTA_COAST_INSTALL
+                        NCVISTA_COAST_INSTALL,
+#else
+                        nullptr,
+#endif
+#ifdef NCVISTA_COAST_SRC
+                        NCVISTA_COAST_SRC
+#else
+                        nullptr
+#endif
+    );
+}
+
+std::string default_borders_path() {
+    return resolve_data("NCVISTA_BORDERS", "borders.bin",
+#ifdef NCVISTA_BORDERS_INSTALL
+                        NCVISTA_BORDERS_INSTALL,
+#else
+                        nullptr,
+#endif
+#ifdef NCVISTA_BORDERS_SRC
+                        NCVISTA_BORDERS_SRC
+#else
+                        nullptr
+#endif
+    );
 }

@@ -36,19 +36,21 @@ add_executable(ncvista
   src/ncfile.cpp
   src/units.cpp
   src/colormap.cpp
-  src/coastline.cpp)
+  src/overlay.cpp)
 
 target_include_directories(ncvista PRIVATE ${GUI_INCLUDE_DIRS})
 if(HPC_PREFIX)
   target_include_directories(ncvista PRIVATE ${HPC_PREFIX}/include)
 endif()
 
-# Coastline data file locations (resolved at runtime, in order, after
-# $NCVISTA_COAST and paths relative to the executable).
+# Coastline / border data file locations (resolved at runtime, in order, after
+# the env overrides and paths relative to the executable).
 target_compile_definitions(ncvista PRIVATE
   NCVISTA_VERSION="${PROJECT_VERSION}"
   NCVISTA_COAST_SRC="${CMAKE_CURRENT_SOURCE_DIR}/coastlines.bin"
-  NCVISTA_COAST_INSTALL="${CMAKE_INSTALL_PREFIX}/share/ncvista/coastlines.bin")
+  NCVISTA_COAST_INSTALL="${CMAKE_INSTALL_PREFIX}/share/ncvista/coastlines.bin"
+  NCVISTA_BORDERS_SRC="${CMAKE_CURRENT_SOURCE_DIR}/borders.bin"
+  NCVISTA_BORDERS_INSTALL="${CMAKE_INSTALL_PREFIX}/share/ncvista/borders.bin")
 
 target_link_directories(ncvista PRIVATE
   ${GUI_LIBRARY_DIRS}
@@ -75,4 +77,4 @@ set_target_properties(ncvista PROPERTIES
   INSTALL_RPATH "${_ncv_rpath}")
 
 install(TARGETS ncvista RUNTIME DESTINATION bin)
-install(FILES coastlines.bin DESTINATION share/ncvista OPTIONAL)
+install(FILES coastlines.bin borders.bin DESTINATION share/ncvista OPTIONAL)
