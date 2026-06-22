@@ -28,9 +28,10 @@ coastline overlay](docs/screenshot.png)
   udunits and labelled with calendar dates instead of raw numbers. Playback
   controls (first / previous / play / next) sit to the left of the time slider.
 - Animation along the time (or first extra) dimension: play/pause, step, speed.
-- Seven built-in colormaps (viridis, inferno, cividis, blue-red diverging,
-  thermal, ocean, grayscale), chosen from a dropdown with gradient swatches
-  (the colormap button), or cycled with `c`.
+- Built-in colormaps: sequential perceptual (viridis, inferno, plasma, magma,
+  cividis, thermal, ocean), white/light-centred diverging ones for anomalies
+  (coolwarm, RdYlBu, BrBG, PuOr, seismic), and grayscale. Chosen from a
+  dropdown with gradient swatches (the colormap button), or cycled with `c`.
 - Colorbar with tick labels. The value range starts **fixed**, derived from a
   quick global min/max scan of the variable (sub-sampled for large files) so the
   colour scale is stable across time steps. The min and max are editable: click
