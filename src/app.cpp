@@ -153,6 +153,7 @@ private:
     Slice slice_;
     bool flip_y_ = false;
     bool auto_range_ = false;           // start with a fixed (global) range
+    bool symmetric_ = false;            // force the scale symmetric around zero
     double vmin_ = 0, vmax_ = 1;
     int editing_ = 0;                   // 0 none, 1 editing min, 2 editing max
     std::string edit_buf_;
@@ -264,6 +265,7 @@ private:
     Rect r_sidebar_, r_plot_, r_colorbar_, r_toolbar_, r_header_;
     Rect r_first_, r_play_, r_prev_, r_next_, r_cmap_, r_flip_, r_range_, r_coast_, r_info_;
     Rect r_cbmax_, r_cbmin_;           // editable colorbar bound fields
+    Rect r_sym_;                       // symmetric-around-zero toggle
     std::vector<Rect> r_varitems_;     // parallel to nc_.displayable()
     int sidebar_scroll_ = 0;           // pixels scrolled from top
     Rect r_sb_track_;                  // sidebar scrollbar hit region (empty if none)
@@ -278,6 +280,7 @@ private:
     void select_var(int vidx);
     void reload_slice();
     void compute_range();
+    void apply_symmetric();            // force [-M, +M] with M = max(|lo|,|hi|)
     int time_dim_pos() const;          // dim position that is a time axis, or -1
 
     void layout();
@@ -368,6 +371,7 @@ void App::select_var(int vidx) {
     if (nc_.var_minmax(v, lo, hi) && hi > lo) {
         auto_range_ = false;
         vmin_ = lo; vmax_ = hi;
+        apply_symmetric();
     } else {
         auto_range_ = true;
     }
@@ -384,6 +388,16 @@ void App::reload_slice() {
 void App::compute_range() {
     if (slice_.valid) { vmin_ = slice_.dmin; vmax_ = slice_.dmax; }
     if (vmax_ <= vmin_) vmax_ = vmin_ + 1.0;
+    apply_symmetric();
+}
+
+// Make the colour scale symmetric about zero: [-M, +M] with M the larger of
+// |vmin| and |vmax|, so diverging fields are centred on zero.
+void App::apply_symmetric() {
+    if (!symmetric_) return;
+    double m = std::max(std::fabs(vmin_), std::fabs(vmax_));
+    if (m <= 0) m = 1.0;
+    vmin_ = -m; vmax_ = m;
 }
 
 std::string App::dim_label(int dimpos, size_t idx) const {
@@ -699,6 +713,7 @@ void App::draw_button_tooltip() {
         {&r_cmap_,  "Choose colour map"},
         {&r_flip_,  "Flip the image vertically"},
         {&r_range_, "Toggle auto / fixed colour range"},
+        {&r_sym_,   "Symmetric colour scale around zero (±max|value|)"},
         {&r_coast_, "Toggle coastline overlay"},
         {&r_info_,  "Open the metadata window"},
     };
@@ -1065,13 +1080,16 @@ void App::draw_coast(double ox, double oy, double s, int nx, int ny,
 void App::draw_colorbar() {
     const Rect &R = r_colorbar_;
 
-    // Fixed/auto range toggle above the colour scale. A check mark and accent
-    // highlight indicate that the range is fixed (auto scaling off).
-    double btn_h = 24;
+    // Range toggles above the colour scale, each with a check mark / accent
+    // highlight when active: "fixed" pins the range; "±sym" makes it symmetric
+    // around zero (useful for diverging fields).
+    double btn_h = 24, btn_gap = 6;
     r_range_ = {R.x + 6, R.y + 6, R.w - 12, btn_h};
     draw_button(cr_, r_range_, auto_range_ ? "fixed" : "fixed ✓", !auto_range_, false);
+    r_sym_ = {R.x + 6, R.y + 6 + btn_h + btn_gap, R.w - 12, btn_h};
+    draw_button(cr_, r_sym_, symmetric_ ? "symmetric ✓" : "symmetric", symmetric_, false);
 
-    const double reserve = btn_h + 14;     // vertical space taken by the toggle
+    const double reserve = 2 * btn_h + btn_gap + 14;  // space taken by the toggles
     double barx = R.x + 8, bary = R.y + 24 + reserve;
     double barw = 22, barh = R.h - 48 - reserve;
     const Palette &cm = cmaps_[cmap_idx_];
@@ -1220,6 +1238,18 @@ void App::on_button(int bx, int by, int button) {
             } else {
                 double lo, hi;                    // back to fixed global range
                 if (nc_.var_minmax(cur(), lo, hi) && hi > lo) { vmin_ = lo; vmax_ = hi; }
+                apply_symmetric();
+            }
+            return;
+        }
+        if (r_sym_.hit(bx, by)) {
+            symmetric_ = !symmetric_;
+            if (auto_range_) {
+                compute_range();                  // recompute, then (un)symmetrise
+            } else {
+                double lo, hi;
+                if (nc_.var_minmax(cur(), lo, hi) && hi > lo) { vmin_ = lo; vmax_ = hi; }
+                apply_symmetric();
             }
             return;
         }
@@ -1374,6 +1404,17 @@ void App::on_key(KeySym ks) {
             } else {
                 double lo, hi;
                 if (nc_.var_minmax(cur(), lo, hi) && hi > lo) { vmin_ = lo; vmax_ = hi; }
+                apply_symmetric();
+            }
+            break;
+        case XK_s:
+            symmetric_ = !symmetric_;
+            if (auto_range_) {
+                compute_range();
+            } else {
+                double lo, hi;
+                if (nc_.var_minmax(cur(), lo, hi) && hi > lo) { vmin_ = lo; vmax_ = hi; }
+                apply_symmetric();
             }
             break;
         case XK_plus: case XK_equal: fps_ = std::min(30.0, fps_ + 1); break;

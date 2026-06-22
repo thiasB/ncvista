@@ -36,7 +36,9 @@ coastline overlay](docs/screenshot.png)
   colour scale is stable across time steps. The min and max are editable: click
   a colorbar bound field and type a new value (Enter applies, Esc cancels). The
   **fixed** button above the colour scale toggles between this fixed global
-  range and per-slice auto.
+  range and per-slice auto. The **symmetric** button (below it) makes the scale
+  symmetric around zero — `[-M, +M]` with `M = max(|min|, |max|)` — which centres
+  diverging fields (e.g. anomalies) on zero.
 - Missing/fill values are rendered white.
 - The window opens at a default size whose plot canvas matches a global
   longitude/latitude grid (360 × 180, a 2:1 map); it is freely resizable.
@@ -79,6 +81,7 @@ coastline overlay](docs/screenshot.png)
 | Choose colormap   | the colormap button (dropdown); `c` cycles |
 | Flip Y (N↕S)      | `f` or the flip button                   |
 | Auto/fixed range  | `a` or the **fixed** button (above the colour scale) |
+| Symmetric scale   | `s` or the **symmetric** button               |
 | Edit min / max    | click a colorbar bound field, type, Enter|
 | Coastlines overlay| `l` or the coast button (geographic data)|
 | Metadata window   | `m` / `i` or the ⓘ metadata button       |
