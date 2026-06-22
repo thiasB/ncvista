@@ -31,7 +31,8 @@ coastline overlay](docs/screenshot.png)
 - Built-in colormaps: sequential perceptual (viridis, inferno, plasma, magma,
   cividis, thermal, ocean), white/light-centred diverging ones for anomalies
   (coolwarm, RdYlBu, BrBG, PuOr, seismic), and grayscale. Chosen from a
-  dropdown with gradient swatches (the colormap button), or cycled with `c`.
+  dropdown with gradient swatches (the colormap button), or cycled with `c`; the
+  **reverse** button above the colour scale flips any palette's direction.
 - Colorbar with tick labels. The value range starts **fixed**, derived from a
   quick global min/max scan of the variable (sub-sampled for large files) so the
   colour scale is stable across time steps. The min and max are editable: click
@@ -83,6 +84,7 @@ coastline overlay](docs/screenshot.png)
 | Flip Y (N↕S)      | `f` or the flip button                   |
 | Auto/fixed range  | `a` or the **fixed** button (above the colour scale) |
 | Symmetric scale   | `s` or the **symmetric** button               |
+| Reverse colours   | `r` or the **reverse** button            |
 | Edit min / max    | click a colorbar bound field, type, Enter|
 | Coastlines overlay| `l` or the coast button (geographic data)|
 | Metadata window   | `m` / `i` or the ⓘ metadata button       |

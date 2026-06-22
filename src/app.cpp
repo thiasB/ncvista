@@ -154,6 +154,7 @@ private:
     bool flip_y_ = false;
     bool auto_range_ = false;           // start with a fixed (global) range
     bool symmetric_ = false;            // force the scale symmetric around zero
+    bool reversed_ = false;             // reverse the colour scale direction
     double vmin_ = 0, vmax_ = 1;
     int editing_ = 0;                   // 0 none, 1 editing min, 2 editing max
     std::string edit_buf_;
@@ -166,6 +167,7 @@ private:
     int img_cmap_ = -1, img_nx_ = -1, img_ny_ = -1;
     double img_vmin_ = 0, img_vmax_ = 0;
     bool img_flip_ = false;
+    bool img_rev_ = false;
 
     std::vector<double> ycoord_, xcoord_;
     Coastlines coast_;
@@ -266,6 +268,7 @@ private:
     Rect r_first_, r_play_, r_prev_, r_next_, r_cmap_, r_flip_, r_range_, r_coast_, r_info_;
     Rect r_cbmax_, r_cbmin_;           // editable colorbar bound fields
     Rect r_sym_;                       // symmetric-around-zero toggle
+    Rect r_cmaprev_;                   // reverse-colour-scale toggle
     std::vector<Rect> r_varitems_;     // parallel to nc_.displayable()
     int sidebar_scroll_ = 0;           // pixels scrolled from top
     Rect r_sb_track_;                  // sidebar scrollbar hit region (empty if none)
@@ -714,6 +717,7 @@ void App::draw_button_tooltip() {
         {&r_flip_,  "Flip the image vertically"},
         {&r_range_, "Toggle auto / fixed colour range"},
         {&r_sym_,   "Symmetric colour scale around zero (±max|value|)"},
+        {&r_cmaprev_, "Reverse the colour scale"},
         {&r_coast_, "Toggle coastline overlay"},
         {&r_info_,  "Open the metadata window"},
     };
@@ -850,6 +854,7 @@ void App::draw_plot() {
     bool stale = !data_img_ || img_ver_ != slice_version_ ||
                  img_cmap_ != cmap_idx_ || img_vmin_ != vmin_ ||
                  img_vmax_ != vmax_ || img_flip_ != flip_y_ ||
+                 img_rev_ != reversed_ ||
                  img_nx_ != nx || img_ny_ != ny;
     if (stale) {
         if (data_img_) cairo_surface_destroy(data_img_);
@@ -868,6 +873,7 @@ void App::draw_plot() {
                     continue;
                 }
                 double t = (val - vmin_) / span;
+                if (reversed_) t = 1.0 - t;
                 uint8_t r, g, b;
                 cm.sample(t, r, g, b);
                 row[xx] = (0xFFu << 24) | (r << 16) | (g << 8) | b;
@@ -876,6 +882,7 @@ void App::draw_plot() {
         cairo_surface_mark_dirty(data_img_);
         img_ver_ = slice_version_; img_cmap_ = cmap_idx_;
         img_vmin_ = vmin_; img_vmax_ = vmax_; img_flip_ = flip_y_;
+        img_rev_ = reversed_;
         img_nx_ = nx; img_ny_ = ny;
     }
 
@@ -1080,22 +1087,25 @@ void App::draw_coast(double ox, double oy, double s, int nx, int ny,
 void App::draw_colorbar() {
     const Rect &R = r_colorbar_;
 
-    // Range toggles above the colour scale, each with a check mark / accent
-    // highlight when active: "fixed" pins the range; "±sym" makes it symmetric
-    // around zero (useful for diverging fields).
+    // Toggles above the colour scale, each with a check mark / accent highlight
+    // when active: "fixed" pins the range; "symmetric" centres it on zero;
+    // "reverse" flips the colour scale direction.
     double btn_h = 24, btn_gap = 6;
     r_range_ = {R.x + 6, R.y + 6, R.w - 12, btn_h};
     draw_button(cr_, r_range_, auto_range_ ? "fixed" : "fixed ✓", !auto_range_, false);
-    r_sym_ = {R.x + 6, R.y + 6 + btn_h + btn_gap, R.w - 12, btn_h};
+    r_sym_ = {R.x + 6, R.y + 6 + (btn_h + btn_gap), R.w - 12, btn_h};
     draw_button(cr_, r_sym_, symmetric_ ? "symmetric ✓" : "symmetric", symmetric_, false);
+    r_cmaprev_ = {R.x + 6, R.y + 6 + 2 * (btn_h + btn_gap), R.w - 12, btn_h};
+    draw_button(cr_, r_cmaprev_, reversed_ ? "reverse ✓" : "reverse", reversed_, false);
 
-    const double reserve = 2 * btn_h + btn_gap + 14;  // space taken by the toggles
+    const double reserve = 3 * btn_h + 2 * btn_gap + 14;  // space taken by the toggles
     double barx = R.x + 8, bary = R.y + 24 + reserve;
     double barw = 22, barh = R.h - 48 - reserve;
     const Palette &cm = cmaps_[cmap_idx_];
 
     for (int i = 0; i < (int)barh; ++i) {
         double t = 1.0 - (double)i / barh; // top = max
+        if (reversed_) t = 1.0 - t;
         uint8_t r, g, b; cm.sample(t, r, g, b);
         cairo_set_source_rgb(cr_, r / 255.0, g / 255.0, b / 255.0);
         cairo_rectangle(cr_, barx, bary + i, barw, 1.5);
@@ -1253,6 +1263,7 @@ void App::on_button(int bx, int by, int button) {
             }
             return;
         }
+        if (r_cmaprev_.hit(bx, by)) { reversed_ = !reversed_; return; }
         if (r_coast_.hit(bx, by)) { show_coast_ = !show_coast_; return; }
         if (r_info_.hit(bx, by)) {
             if (meta_win_) close_meta_window();
@@ -1417,6 +1428,7 @@ void App::on_key(KeySym ks) {
                 apply_symmetric();
             }
             break;
+        case XK_r: reversed_ = !reversed_; break;
         case XK_plus: case XK_equal: fps_ = std::min(30.0, fps_ + 1); break;
         case XK_minus: fps_ = std::max(1.0, fps_ - 1); break;
         case XK_m: case XK_i:
