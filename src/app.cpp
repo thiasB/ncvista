@@ -422,14 +422,18 @@ std::string App::dim_label(int dimpos, size_t idx) const {
 
 void App::apply_default_size() {
     // Size the window so the plot canvas holds a standard global lon/lat grid
-    // (360 x 180) at 2 px per cell, i.e. a 720 x 360 (2:1) map, plus the chrome.
-    const int GRID_NX = 360, GRID_NY = 180, CELL = 2;
+    // (360 x 180, a 2:1 map). The per-cell size is chosen so the whole window is
+    // about TARGET_W wide while the plot still fully fills the 2:1 aspect.
+    const int GRID_NX = 360, GRID_NY = 180;
     const double inner = 16;            // inner padding used inside the plot rect
+    const double TARGET_W = 1500;       // desired initial window width (px)
+    const double chrome_w = SIDEBAR_W + COLORBAR_W + 3 * PAD;
+    double cell = std::max(2.0, (TARGET_W - chrome_w - inner) / GRID_NX);
     int nslid = (cur_var_ >= 0) ? std::max(0, cur().ndims - 2) : 0;
     double slider_area = nslid > 0 ? (nslid * 34 + 16) : CONTROLS_H;
-    double plot_w = GRID_NX * CELL + inner;
-    double plot_h = GRID_NY * CELL + inner;
-    width_  = (int)std::lround(plot_w + SIDEBAR_W + COLORBAR_W + 3 * PAD);
+    double plot_w = GRID_NX * cell + inner;
+    double plot_h = GRID_NY * cell + inner;
+    width_  = (int)std::lround(plot_w + chrome_w);
     height_ = (int)std::lround(plot_h + slider_area + TOOLBAR_H + HEADER_H + 2 * PAD);
 }
 
@@ -1119,8 +1123,8 @@ void App::draw_colorbar() {
     // Editable max (top) and min (bottom) fields, plus interior ticks.
     double fx = barx + barw + 7;
     double fw = std::max(46.0, R.x + R.w - fx - 2);
-    r_cbmax_ = {fx, bary - 9, fw, 18};
-    r_cbmin_ = {fx, bary + barh - 9, fw, 18};
+    r_cbmax_ = {fx, bary - 11, fw, 22};
+    r_cbmin_ = {fx, bary + barh - 11, fw, 22};
 
     const int nticks = 6;
     for (int i = 1; i < nticks - 1; ++i) {
@@ -1131,7 +1135,7 @@ void App::draw_colorbar() {
         cairo_move_to(cr_, barx + barw, ty);
         cairo_line_to(cr_, barx + barw + 4, ty);
         cairo_stroke(cr_);
-        draw_text(cr_, fmt_num(val), fx, ty - 7, COL_TEXT_DIM, 11);
+        draw_text(cr_, fmt_num(val), fx, ty - 8, COL_TEXT_DIM, 13);
     }
 
     auto draw_field = [&](const Rect &r, bool editing, const std::string &val) {
@@ -1142,7 +1146,7 @@ void App::draw_colorbar() {
         cairo_set_line_width(cr_, editing ? 1.5 : 1);
         cairo_stroke(cr_);
         std::string s = editing ? (val + "|") : val;
-        draw_text(cr_, s, r.x + 5, r.y + 2, editing ? RGB{1, 1, 1} : COL_TEXT, 11,
+        draw_text(cr_, s, r.x + 5, r.y + 3, editing ? RGB{1, 1, 1} : COL_TEXT, 13,
                   false, PANGO_ALIGN_LEFT, r.w - 8);
     };
     draw_field(r_cbmax_, editing_ == 2, editing_ == 2 ? edit_buf_ : fmt_num(vmax_));
