@@ -517,9 +517,9 @@ void App::layout() {
         double w, h; text_size(cr_, s, 13, true, w, h); bw = std::max(bw, w);
     };
     for (const auto &c : cmaps_) consider("▦ " + c.name);
-    consider("flip ✓");
-    consider("coast ✓");
-    consider("borders ✓");
+    consider("↕ flip ✓");
+    consider("∿ coast ✓");
+    consider("╌ borders ✓");
     consider("♁ Gall-Peters");
     consider("ⓘ metadata");
     bw += 24;                              // horizontal padding inside the button
@@ -649,12 +649,12 @@ void App::draw_toolbar() {
     cairo_stroke(cr_);
 
     draw_button(cr_, r_cmap_, "▦ " + cmaps_[cmap_idx_].name, false, false);
-    draw_button(cr_, r_flip_, flip_y_ ? "flip ✓" : "flip", flip_y_, false);
+    draw_button(cr_, r_flip_, flip_y_ ? "↕ flip ✓" : "↕ flip", flip_y_, false);
     draw_button(cr_, r_coast_,
-                show_coast_ ? "coast ✓" : "coast",
+                show_coast_ ? "∿ coast ✓" : "∿ coast",
                 show_coast_ && geographic_, false);
     draw_button(cr_, r_borders_,
-                show_borders_ ? "borders ✓" : "borders",
+                show_borders_ ? "╌ borders ✓" : "╌ borders",
                 show_borders_ && geographic_, false);
     draw_button(cr_, r_proj_, std::string("♁ ") + proj::name(proj_idx_),
                 projected(), false);
