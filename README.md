@@ -13,13 +13,15 @@ coastline overlay](docs/screenshot.png)
 
 ## Features
 
-- Sidebar listing every displayable (≥2-D numeric) variable with its long name
+- Sidebar listing every displayable (≥1-D numeric) variable with its long name
   and units. Supporting variables (cell bounds such as `time_bnds`, auxiliary
   coordinates, grid mappings, and coordinate variables such as `depth`/`lev`)
   are detected, dimmed, and sorted to the end; the initial selection is always a
   real data field. The list scrolls (mouse wheel or a draggable scrollbar) and a
   hover tooltip shows the full name and units when an entry is truncated.
 - 2-D field rendering of the last two dimensions, aspect-ratio preserved.
+- 1-D variables are shown as a line plot filling the main window (the same chart
+  as the time-series window), with a calendar/numeric x-axis.
 - **Zoom & pan**: drag a rectangle over the plot to zoom into that region (the
   coastline overlay and hover readout follow); right-click to reset. When zoomed,
   pan with the scrollbars along the plot edges, or with the mouse wheel (vertical,

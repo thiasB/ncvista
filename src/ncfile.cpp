@@ -148,12 +148,13 @@ bool NcFile::open(const std::string &path, std::string &err) {
     }
 
     // Displayable list: real data variables first, supporting ones last
-    // (each group keeps file order — a stable two-pass build).
+    // (each group keeps file order — a stable two-pass build). 1-D numeric
+    // variables are included too and shown as a line plot.
     for (size_t i = 0; i < vars_.size(); ++i)
-        if (vars_[i].numeric && vars_[i].ndims >= 2 && !vars_[i].aux)
+        if (vars_[i].numeric && vars_[i].ndims >= 1 && !vars_[i].aux)
             displayable_.push_back((int)i);
     for (size_t i = 0; i < vars_.size(); ++i)
-        if (vars_[i].numeric && vars_[i].ndims >= 2 && vars_[i].aux)
+        if (vars_[i].numeric && vars_[i].ndims >= 1 && vars_[i].aux)
             displayable_.push_back((int)i);
 
     return true;
@@ -362,8 +363,8 @@ std::vector<double> NcFile::read_series(const NcVar &v,
                                         const std::vector<size_t> &fixed,
                                         int series_pos, size_t yidx,
                                         size_t xidx) const {
-    if (v.ndims < 2 || series_pos < 0 || series_pos >= v.ndims) return {};
-    const int yi = v.ndims - 2, xi = v.ndims - 1;
+    if (v.ndims < 1 || series_pos < 0 || series_pos >= v.ndims) return {};
+    const int yi = v.ndims - 2, xi = v.ndims - 1;  // yi == -1 for a 1-D variable
 
     std::vector<size_t> start(v.ndims, 0), count(v.ndims, 1);
     for (int p = 0; p < v.ndims; ++p) {

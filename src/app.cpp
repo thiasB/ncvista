@@ -245,6 +245,21 @@ private:
     void close_ts_window();
     void draw_ts();
 
+    // Reusable line-chart renderer (used by the time-series window and by the
+    // main plot when the current variable is 1-D).
+    void draw_series(cairo_t *cr, const Rect &R,
+                     const std::vector<double> &xv, const std::vector<double> &yv,
+                     double ymin, double ymax, bool is_time,
+                     const std::string &xunits, const std::string &xcal, int cur_idx);
+
+    // ---- 1-D variable shown as a line plot in the main window ------------
+    std::vector<double> line_vals_, line_x_;
+    bool line_is_time_ = false;
+    std::string line_xunits_, line_xcal_;
+    double line_ymin_ = 0, line_ymax_ = 1;
+    void setup_line();                 // populate the above from the current 1-D var
+    void draw_plot_line();             // render the line plot in r_plot_
+
     // Geometry of the drawn field image, stored by draw_plot for hit-testing.
     double plot_ox_ = 0, plot_oy_ = 0, plot_s_ = 0, plot_dw_ = 0, plot_dh_ = 0;
     int plot_nx_ = 0, plot_ny_ = 0;
@@ -337,6 +352,10 @@ void App::select_var(int vidx) {
     const NcVar &v = cur();
     fixed_.assign(v.ndims, 0);
     zoomed_ = false; selecting_ = false;   // a different grid: start unzoomed
+    editing_ = 0;
+
+    // A 1-D variable is shown as a line plot rather than a 2-D field.
+    if (v.ndims == 1) { anim_dim_ = -1; geographic_ = false; setup_line(); return; }
 
     // y/x coordinate variables (last two dims).
     ycoord_ = nc_.coord_values(v.dimids[v.ndims - 2]);
@@ -393,6 +412,26 @@ void App::reload_slice() {
     slice_ = nc_.read_slice(cur(), fixed_);
     ++slice_version_;                 // invalidates the cached field image
     if (auto_range_) compute_range();
+}
+
+// Read a 1-D variable into a series plotted as a line in the main window.
+void App::setup_line() {
+    const NcVar &v = cur();
+    line_vals_ = nc_.read_series(v, fixed_, 0, 0, 0);   // whole variable along dim 0
+    int d = v.dimids[0];
+    line_x_ = nc_.coord_values(d);
+    line_xunits_ = nc_.coord_units(d);
+    line_xcal_ = nc_.coord_calendar(d);
+    line_is_time_ = units_.is_time(line_xunits_);
+
+    double lo = std::numeric_limits<double>::infinity();
+    double hi = -std::numeric_limits<double>::infinity();
+    for (double y : line_vals_)
+        if (std::isfinite(y)) { lo = std::min(lo, y); hi = std::max(hi, y); }
+    if (lo > hi) { lo = 0; hi = 1; }
+    if (hi == lo) { hi = lo + 1; }
+    double margin = 0.05 * (hi - lo);
+    line_ymin_ = lo - margin; line_ymax_ = hi + margin;
 }
 
 void App::compute_range() {
@@ -487,13 +526,16 @@ void App::layout() {
 
     // Bottom area: dimension sliders. The playback buttons sit in the left
     // gutter of the time slider's row (no time axis -> a small button strip).
+    // A 1-D variable (line plot) has no sliders, colour scale or playback, so
+    // the plot uses the full content area.
     const NcVar *v = cur_var_ >= 0 ? &cur() : nullptr;
+    bool line_mode = v && v->ndims == 1;
     int nslid = v ? std::max(0, v->ndims - 2) : 0;
-    double slider_area = nslid > 0 ? (nslid * 34 + 16) : CONTROLS_H;
-    double colorbar_w = COLORBAR_W;     // wide enough for editable bound fields
+    double slider_area = line_mode ? 0.0 : (nslid > 0 ? (nslid * 34 + 16) : CONTROLS_H);
+    double colorbar_w = line_mode ? 0.0 : COLORBAR_W;  // editable bound fields
 
     r_colorbar_ = {cx + cw - colorbar_w, cy, colorbar_w, ch - slider_area};
-    r_plot_ = {cx, cy, cw - colorbar_w - pad, ch - slider_area};
+    r_plot_ = {cx, cy, cw - colorbar_w - (colorbar_w > 0 ? pad : 0), ch - slider_area};
 
     // sliders — tracks start past the button gutter so the time row aligns.
     sliders_.clear();
@@ -509,14 +551,19 @@ void App::layout() {
         }
     }
 
-    // playback controls, left of the time slider (centred on its track)
-    double cby = (time_track_y >= 0) ? (time_track_y + 4 - 16)
-                                     : (cy + ch - CONTROLS_H + 4);
-    double cbh = 32, cbx = cx;
-    r_first_ = {cbx, cby, 32, cbh}; cbx += 36;
-    r_prev_  = {cbx, cby, 32, cbh}; cbx += 36;
-    r_play_  = {cbx, cby, 42, cbh}; cbx += 46;
-    r_next_  = {cbx, cby, 32, cbh};
+    // playback controls, left of the time slider (centred on its track);
+    // suppressed for the 1-D line plot (no animation).
+    if (line_mode) {
+        r_first_ = r_prev_ = r_play_ = r_next_ = {0, 0, 0, 0};
+    } else {
+        double cby = (time_track_y >= 0) ? (time_track_y + 4 - 16)
+                                         : (cy + ch - CONTROLS_H + 4);
+        double cbh = 32, cbx = cx;
+        r_first_ = {cbx, cby, 32, cbh}; cbx += 36;
+        r_prev_  = {cbx, cby, 32, cbh}; cbx += 36;
+        r_play_  = {cbx, cby, 42, cbh}; cbx += 46;
+        r_next_  = {cbx, cby, 32, cbh};
+    }
 }
 
 // ---- rendering -------------------------------------------------------------
@@ -858,6 +905,13 @@ void App::draw_plot() {
     draw_text(cr_, head + un, r_header_.x + 4, r_header_.y + 5, COL_TEXT, 15, true,
               PANGO_ALIGN_LEFT, r_header_.w);
 
+    // 1-D variables are drawn as a line plot rather than a 2-D field.
+    if (v.ndims == 1) {
+        plot_s_ = 0; plot_nx_ = plot_ny_ = 0;   // disable field click/hover targets
+        draw_plot_line();
+        return;
+    }
+
     if (!slice_.valid || slice_.nx <= 0 || slice_.ny <= 0) {
         draw_text(cr_, "no data", R.x + R.w / 2 - 30, R.y + R.h / 2, COL_TEXT_DIM, 14);
         return;
@@ -1115,6 +1169,11 @@ void App::draw_overlay(const Coastlines &src, LineOverlay &ov, const RGB &core,
 
 void App::draw_colorbar() {
     const Rect &R = r_colorbar_;
+    // No colour scale for the 1-D line plot; drop the toggle hit-rects too.
+    if (R.w < 1 || (cur_var_ >= 0 && cur().ndims == 1)) {
+        r_range_ = r_sym_ = r_cmaprev_ = r_cbmax_ = r_cbmin_ = {0, 0, 0, 0};
+        return;
+    }
 
     // Toggles above the colour scale, each with a check mark / accent highlight
     // when active: "fixed" pins the range; "symmetric" centres it on zero;
@@ -1180,6 +1239,7 @@ void App::draw_colorbar() {
 
 void App::draw_sliders() {
     if (cur_var_ < 0) return;
+    if (cur().ndims == 1) return;      // 1-D line plot: no sliders / playback
     const NcVar &v = cur();
     for (const auto &sl : sliders_) {
         int p = sl.dimpos;
@@ -1817,17 +1877,28 @@ void App::draw_ts() {
     draw_text(cr, ts_subtitle_, 16, 34, COL_TEXT_DIM, 12, false, PANGO_ALIGN_LEFT,
               ts_w_ - 32);
 
-    const double ml = 74, mr = 22, mt = 62, mb = 50;
-    double px0 = ml, py0 = mt, pw = ts_w_ - ml - mr, ph = ts_h_ - mt - mb;
-    if (pw < 20 || ph < 20) { cairo_surface_flush(ts_surf_); XFlush(dpy_); return; }
+    Rect R{0, 46, (double)ts_w_, (double)ts_h_ - 46};
+    draw_series(cr, R, ts_x_, ts_vals_, ts_ymin_, ts_ymax_, ts_is_time_,
+                ts_xunits_, ts_xcal_, ts_cur_idx_);
 
-    int n = (int)ts_vals_.size();
-    auto xmap = [&](int i) {
-        return px0 + (n > 1 ? (double)i / (n - 1) : 0.5) * pw;
-    };
-    auto ymap = [&](double val) {
-        return py0 + ph - (val - ts_ymin_) / (ts_ymax_ - ts_ymin_) * ph;
-    };
+    cairo_surface_flush(ts_surf_);
+    XFlush(dpy_);
+}
+
+// Draw a line chart of (xv, yv) within rectangle R. cur_idx (>= 0) highlights a
+// sample (the current animation frame); pass -1 for none.
+void App::draw_series(cairo_t *cr, const Rect &R,
+                      const std::vector<double> &xv, const std::vector<double> &yv,
+                      double ymin, double ymax, bool is_time,
+                      const std::string &xunits, const std::string &xcal, int cur_idx) {
+    const double ml = 64, mr = 16, mt = 10, mb = 34;
+    double px0 = R.x + ml, py0 = R.y + mt, pw = R.w - ml - mr, ph = R.h - mt - mb;
+    if (pw < 20 || ph < 20) return;
+    if (ymax <= ymin) ymax = ymin + 1;
+
+    int n = (int)yv.size();
+    auto xmap = [&](int i) { return px0 + (n > 1 ? (double)i / (n - 1) : 0.5) * pw; };
+    auto ymap = [&](double val) { return py0 + ph - (val - ymin) / (ymax - ymin) * ph; };
 
     // Plot frame.
     set_color(cr, COL_PLOTBG);
@@ -1839,7 +1910,7 @@ void App::draw_ts() {
     cairo_set_line_width(cr, 1);
     for (int i = 0; i < nyt; ++i) {
         double f = (double)i / (nyt - 1);
-        double val = ts_ymax_ - f * (ts_ymax_ - ts_ymin_);
+        double val = ymax - f * (ymax - ymin);
         double y = py0 + f * ph;
         set_color(cr, COL_BORDER, 0.6);
         cairo_move_to(cr, px0, y); cairo_line_to(cr, px0 + pw, y);
@@ -1857,20 +1928,20 @@ void App::draw_ts() {
         cairo_move_to(cr, x, py0); cairo_line_to(cr, x, py0 + ph);
         cairo_stroke(cr);
         std::string lbl;
-        if (ts_is_time_ && idx < (int)ts_x_.size())
-            lbl = units_.format_time(ts_xunits_, ts_xcal_, ts_x_[idx]);
-        else if (idx < (int)ts_x_.size())
-            lbl = fmt_num(ts_x_[idx]);
+        if (is_time && idx < (int)xv.size())
+            lbl = units_.format_time(xunits, xcal, xv[idx]);
+        else if (idx < (int)xv.size())
+            lbl = fmt_num(xv[idx]);
         else
             lbl = std::to_string(idx);
         double tw, th; text_size(cr, lbl, 10, false, tw, th);
-        double tx = std::clamp(x - tw / 2, 2.0, (double)ts_w_ - tw - 2);
+        double tx = std::clamp(x - tw / 2, R.x + 2, R.x + R.w - tw - 2);
         draw_text(cr, lbl, tx, py0 + ph + 6, COL_TEXT_DIM, 10);
     }
 
-    // Highlight the current frame's time step.
-    if (ts_cur_idx_ >= 0 && ts_cur_idx_ < n) {
-        double x = xmap(ts_cur_idx_);
+    // Highlight a current sample.
+    if (cur_idx >= 0 && cur_idx < n) {
+        double x = xmap(cur_idx);
         set_color(cr, COL_ACCENT, 0.5);
         cairo_set_line_width(cr, 1.5);
         cairo_move_to(cr, x, py0); cairo_line_to(cr, x, py0 + ph);
@@ -1889,8 +1960,8 @@ void App::draw_ts() {
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
     bool pen = false;
     for (int i = 0; i < n; ++i) {
-        if (std::isnan(ts_vals_[i])) { pen = false; continue; }
-        double x = xmap(i), y = ymap(ts_vals_[i]);
+        if (std::isnan(yv[i])) { pen = false; continue; }
+        double x = xmap(i), y = ymap(yv[i]);
         if (pen) cairo_line_to(cr, x, y); else cairo_move_to(cr, x, y);
         pen = true;
     }
@@ -1899,16 +1970,19 @@ void App::draw_ts() {
     // Point markers when the series is short enough to be legible.
     if (n <= 80) {
         for (int i = 0; i < n; ++i) {
-            if (std::isnan(ts_vals_[i])) continue;
-            double x = xmap(i), y = ymap(ts_vals_[i]);
-            set_color(cr, i == ts_cur_idx_ ? RGB{1, 1, 1} : COL_ACCENT);
-            cairo_arc(cr, x, y, i == ts_cur_idx_ ? 4 : 2.5, 0, 2 * M_PI);
+            if (std::isnan(yv[i])) continue;
+            double x = xmap(i), y = ymap(yv[i]);
+            set_color(cr, i == cur_idx ? RGB{1, 1, 1} : COL_ACCENT);
+            cairo_arc(cr, x, y, i == cur_idx ? 4 : 2.5, 0, 2 * M_PI);
             cairo_fill(cr);
         }
     }
+}
 
-    cairo_surface_flush(ts_surf_);
-    XFlush(dpy_);
+// The main-window line plot for a 1-D variable.
+void App::draw_plot_line() {
+    draw_series(cr_, r_plot_, line_x_, line_vals_, line_ymin_, line_ymax_,
+                line_is_time_, line_xunits_, line_xcal_, -1);
 }
 
 // ---- main loop -------------------------------------------------------------
@@ -2229,7 +2303,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (nc.displayable().empty()) {
-        std::fprintf(stderr, "ncvista: no displayable (>=2D numeric) variables in %s\n",
+        std::fprintf(stderr, "ncvista: no displayable (numeric) variables in %s\n",
                      argv[1]);
         return 1;
     }
