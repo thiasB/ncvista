@@ -198,6 +198,12 @@ std::string NcFile::coord_calendar(int dimid) const {
     return read_text_att(vid, "calendar");
 }
 
+std::string NcFile::coord_attr(int dimid, const char *name) const {
+    int vid = coord_varid(dimid);
+    if (vid < 0) return {};
+    return read_text_att(vid, name);
+}
+
 // Format the value of one attribute (any numeric or text type) as a string.
 static std::string format_att_value(int ncid, int varid, const char *name) {
     nc_type type;
@@ -362,9 +368,8 @@ bool NcFile::var_minmax(const NcVar &v, double &lo, double &hi) const {
 std::vector<double> NcFile::read_series(const NcVar &v,
                                         const std::vector<size_t> &fixed,
                                         int series_pos, size_t yidx,
-                                        size_t xidx) const {
+                                        size_t xidx, int yi, int xi) const {
     if (v.ndims < 1 || series_pos < 0 || series_pos >= v.ndims) return {};
-    const int yi = v.ndims - 2, xi = v.ndims - 1;  // yi == -1 for a 1-D variable
 
     std::vector<size_t> start(v.ndims, 0), count(v.ndims, 1);
     for (int p = 0; p < v.ndims; ++p) {
@@ -400,12 +405,12 @@ std::vector<double> NcFile::read_series(const NcVar &v,
     return out;
 }
 
-Slice NcFile::read_slice(const NcVar &v, const std::vector<size_t> &fixed) const {
+Slice NcFile::read_slice(const NcVar &v, const std::vector<size_t> &fixed,
+                         int yi, int xi) const {
     Slice s;
-    if (v.ndims < 2) return s;
-
-    const int yi = v.ndims - 2; // position of y dim in dimids
-    const int xi = v.ndims - 1; // position of x dim in dimids
+    if (v.ndims < 2 || yi < 0 || xi < 0 || yi >= v.ndims || xi >= v.ndims ||
+        yi == xi)
+        return s;
 
     std::vector<size_t> start(v.ndims, 0), count(v.ndims, 1);
     for (int p = 0; p < v.ndims; ++p) {
@@ -427,8 +432,27 @@ Slice NcFile::read_slice(const NcVar &v, const std::vector<size_t> &fixed) const
     if (s.ny <= 0 || s.nx <= 0) return s;
     s.data.assign((size_t)s.ny * s.nx, 0.0);
 
-    int rc = nc_get_vara_double(ncid_, v.id, start.data(), count.data(), s.data.data());
-    if (rc != NC_NOERR) return s;
+    // The hyperslab read returns elements in the variable's storage order: of
+    // the two display dims, the one with the smaller position varies slower
+    // (the outer index); every fixed dim has count 1 and so contributes only a
+    // unit stride. When y already precedes x in storage the buffer is the
+    // desired row-major (y outer, x inner) layout and can be filled directly;
+    // otherwise the two display axes are transposed on the way in.
+    const bool y_outer = (yi < xi);
+    if (y_outer) {
+        int rc = nc_get_vara_double(ncid_, v.id, start.data(), count.data(),
+                                    s.data.data());
+        if (rc != NC_NOERR) { s.data.clear(); return s; }
+    } else {
+        std::vector<double> buf((size_t)s.ny * s.nx);
+        int rc = nc_get_vara_double(ncid_, v.id, start.data(), count.data(),
+                                    buf.data());
+        if (rc != NC_NOERR) { s.data.clear(); return s; }
+        // buf is x-outer, y-inner: buf[ix*ny + iy].
+        for (int iy = 0; iy < s.ny; ++iy)
+            for (int ix = 0; ix < s.nx; ++ix)
+                s.data[(size_t)iy * s.nx + ix] = buf[(size_t)ix * s.ny + iy];
+    }
 
     double lo = std::numeric_limits<double>::infinity();
     double hi = -std::numeric_limits<double>::infinity();

@@ -216,8 +216,14 @@ python3 scripts/make_overlays.py ne_110m_admin_0_boundary_lines_land.shp borders
 
 ## Notes and limitations
 
-- Two-dimensional fields are mapped from a variable's last two dimensions
-  (assumed Y, X). Curvilinear/unstructured grids are drawn in index space.
+- The two plotted axes are identified by coordinate metadata — the CF `axis`
+  attribute (`X`/`Y`), then `standard_name`, then units, then the dimension
+  name (all case-insensitive). A longitude/latitude pair is used wherever it
+  appears in the dimension list, so permuted orders such as `(lat, lon, time)`
+  or `(lon, lat, time)` are handled (the field is transposed to north-up
+  row-major as needed). When no geographic pair is recognised, the last two
+  non-time dimensions are used as Y, X, so a time axis is never plotted as a
+  map axis. Curvilinear/unstructured grids are drawn in index space.
 - Time decoding for the standard calendar uses udunits' conversion to a
   reference epoch and POSIX `gmtime` (proleptic Gregorian, no leap seconds),
   which is accurate for typical climate-data date ranges.

@@ -53,10 +53,14 @@ public:
 
     const NcDim &dim(int dimid) const;
 
-    // Read the 2-D field for variable v. The last two dims map to (y, x);
-    // every other dim is fixed at fixed_index[dimid_position].
+    // Read the 2-D field for variable v. Dimension positions `yi` and `xi`
+    // (within v.dimids) map to the display rows (y) and columns (x); every
+    // other dim is fixed at fixed_index[dimid_position]. The result is always
+    // packed row-major (y outer, x inner) regardless of the dims' storage
+    // order, so yi may be greater than xi (e.g. an X-before-Y layout).
     // `fixed` is indexed by position within v.dimids (size == v.ndims).
-    Slice read_slice(const NcVar &v, const std::vector<size_t> &fixed) const;
+    Slice read_slice(const NcVar &v, const std::vector<size_t> &fixed,
+                     int yi, int xi) const;
 
     // Quick estimate of the variable's global value range across the whole
     // file (sub-sampled with a stride for large variables). Ignores fill /
@@ -64,11 +68,13 @@ public:
     bool var_minmax(const NcVar &v, double &lo, double &hi) const;
 
     // Read the 1-D series of variable v along dimension position `series_pos`,
-    // holding the y (row) and x (column) display dims at yidx/xidx and every
-    // other dimension at its value in `fixed`. NaN marks fill/missing values.
-    // Returns an empty vector on error.
+    // holding the y (row) and x (column) display dims — at positions `yi`/`xi`
+    // within v.dimids — at yidx/xidx, and every other dimension at its value in
+    // `fixed`. Pass yi/xi == -1 when there are no display dims (1-D variable).
+    // NaN marks fill/missing values. Returns an empty vector on error.
     std::vector<double> read_series(const NcVar &v, const std::vector<size_t> &fixed,
-                                    int series_pos, size_t yidx, size_t xidx) const;
+                                    int series_pos, size_t yidx, size_t xidx,
+                                    int yi, int xi) const;
 
     // Return values of the 1-D coordinate variable that shares a dimension's
     // name (e.g. "lat", "time"). Empty if none exists or unreadable.
@@ -78,6 +84,9 @@ public:
     std::string coord_units(int dimid) const;
     // The calendar attribute of the coordinate variable for a dimension.
     std::string coord_calendar(int dimid) const;
+    // An arbitrary text attribute of the coordinate variable for a dimension
+    // (e.g. "axis", "standard_name"); empty if absent or non-textual.
+    std::string coord_attr(int dimid, const char *name) const;
 
     // A line is one row of the metadata view; `kind` drives colouring:
     //   0 plain, 1 section header, 2 variable name, 3 attribute name, 4 dimension

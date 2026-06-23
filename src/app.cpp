@@ -22,6 +22,7 @@
 #include <pango/pangocairo.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -152,6 +153,7 @@ private:
 
     int cur_var_ = -1;                 // index into nc_.vars()
     std::vector<size_t> fixed_;        // index per dim position of current var
+    int ydim_ = -1, xdim_ = -1;        // dim positions plotted as rows (y) / cols (x)
     Slice slice_;
     bool flip_y_ = false;
     bool auto_range_ = false;           // start with a fixed (global) range
@@ -359,7 +361,8 @@ private:
 int App::time_dim_pos() const {
     if (cur_var_ < 0) return -1;
     const NcVar &v = cur();
-    for (int p = 0; p < v.ndims - 2; ++p) {
+    for (int p = 0; p < v.ndims; ++p) {
+        if (p == ydim_ || p == xdim_) continue;  // a plotted axis, not a scan dim
         std::string u = nc_.coord_units(v.dimids[p]);
         if (units_.is_time(u)) return p;
     }
@@ -374,32 +377,83 @@ void App::select_var(int vidx) {
     editing_ = 0;
 
     // A 1-D variable is shown as a line plot rather than a 2-D field.
-    if (v.ndims == 1) { anim_dim_ = -1; geographic_ = false; setup_line(); return; }
+    if (v.ndims == 1) {
+        ydim_ = xdim_ = -1; anim_dim_ = -1; geographic_ = false;
+        setup_line(); return;
+    }
 
-    // y/x coordinate variables (last two dims).
-    ycoord_ = nc_.coord_values(v.dimids[v.ndims - 2]);
-    xcoord_ = nc_.coord_values(v.dimids[v.ndims - 1]);
+    // Identify the two display axes. CF recommends T,Z,Y,X order, but files in
+    // the wild permute it (e.g. lat,lon,time or lon,lat,time). Locate longitude
+    // and latitude dims anywhere in the dimension list; when a geographic pair
+    // is found it drives the plot regardless of position. Each axis is matched
+    // from the most reliable signal down: the CF `axis` attribute (X/Y), then
+    // `standard_name`, then the units string, then the dimension name — all
+    // compared case-insensitively so spellings like "Longitude" or "degrees_E"
+    // still match.
+    auto lower = [](std::string s) {
+        for (char &c : s) c = (char)std::tolower((unsigned char)c);
+        return s;
+    };
+    auto is_lon = [&](int dimid) {
+        std::string ax = lower(nc_.coord_attr(dimid, "axis"));
+        std::string sn = lower(nc_.coord_attr(dimid, "standard_name"));
+        std::string u  = lower(nc_.coord_units(dimid));
+        std::string n  = lower(nc_.dim(dimid).name);
+        if (ax == "x") return true;
+        if (sn == "longitude") return true;
+        if (u.find("east") != std::string::npos) return true;   // degrees_east / degrees_E
+        return n == "lon" || n == "longitude" || n == "long" || n == "x" ||
+               n == "rlon" || n == "nav_lon" || n == "xc";
+    };
+    auto is_lat = [&](int dimid) {
+        std::string ax = lower(nc_.coord_attr(dimid, "axis"));
+        std::string sn = lower(nc_.coord_attr(dimid, "standard_name"));
+        std::string u  = lower(nc_.coord_units(dimid));
+        std::string n  = lower(nc_.dim(dimid).name);
+        if (ax == "y") return true;
+        if (sn == "latitude") return true;
+        if (u.find("north") != std::string::npos) return true;  // degrees_north / degrees_N
+        return n == "lat" || n == "latitude" || n == "y" ||
+               n == "rlat" || n == "nav_lat" || n == "yc";
+    };
+    int lonpos = -1, latpos = -1;
+    for (int p = 0; p < v.ndims; ++p) {
+        if (lonpos < 0 && is_lon(v.dimids[p])) lonpos = p;
+        else if (latpos < 0 && is_lat(v.dimids[p])) latpos = p;
+    }
+    const bool geo_pair = (lonpos >= 0 && latpos >= 0 && lonpos != latpos);
+    if (geo_pair) {
+        ydim_ = latpos; xdim_ = lonpos;
+    } else {
+        // No geographic pair recognised: display the last two dimensions, but
+        // never put a time axis on a display axis — a (lon,lat,time) file would
+        // otherwise plot lat against time. Prefer the last two non-time dims.
+        std::vector<int> spatial;
+        for (int p = 0; p < v.ndims; ++p)
+            if (!units_.is_time(nc_.coord_units(v.dimids[p]))) spatial.push_back(p);
+        if ((int)spatial.size() >= 2) {
+            ydim_ = spatial[spatial.size() - 2];
+            xdim_ = spatial[spatial.size() - 1];
+        } else {
+            ydim_ = v.ndims - 2; xdim_ = v.ndims - 1;
+        }
+    }
+
+    // y/x coordinate variables for the chosen display dims.
+    ycoord_ = nc_.coord_values(v.dimids[ydim_]);
+    xcoord_ = nc_.coord_values(v.dimids[xdim_]);
 
     // North-up by default when latitude increases with index.
     flip_y_ = (ycoord_.size() >= 2 && ycoord_.front() < ycoord_.back());
 
     anim_dim_ = time_dim_pos();
-    if (anim_dim_ < 0 && v.ndims > 2) anim_dim_ = 0;
+    if (anim_dim_ < 0 && v.ndims > 2)
+        for (int p = 0; p < v.ndims; ++p)
+            if (p != ydim_ && p != xdim_) { anim_dim_ = p; break; }
 
-    // Decide whether the two plotted axes are geographic (lon/lat), which is a
-    // prerequisite for the coastline overlay.
-    auto is_lon = [&](int dimid) {
-        std::string u = nc_.coord_units(dimid), n = nc_.dim(dimid).name;
-        return u.find("east") != std::string::npos || n == "lon" ||
-               n == "longitude" || n == "x";
-    };
-    auto is_lat = [&](int dimid) {
-        std::string u = nc_.coord_units(dimid), n = nc_.dim(dimid).name;
-        return u.find("north") != std::string::npos || n == "lat" ||
-               n == "latitude" || n == "y";
-    };
-    geographic_ = !xcoord_.empty() && !ycoord_.empty() &&
-                  is_lon(v.dimids[v.ndims - 1]) && is_lat(v.dimids[v.ndims - 2]);
+    // Geographic axes (a prerequisite for the coastline overlay) require both
+    // an identified lon/lat pair and usable coordinate values.
+    geographic_ = geo_pair && !xcoord_.empty() && !ycoord_.empty();
 
     // Fixed range from a quick global min/max scan, so the colour scale is
     // stable across time steps. Falls back to per-slice auto if the scan fails.
@@ -428,7 +482,7 @@ void App::select_var(int vidx) {
 
 void App::reload_slice() {
     if (cur_var_ < 0) return;
-    slice_ = nc_.read_slice(cur(), fixed_);
+    slice_ = nc_.read_slice(cur(), fixed_, ydim_, xdim_);
     ++slice_version_;                 // invalidates the cached field image
     if (auto_range_) compute_range();
 }
@@ -436,7 +490,7 @@ void App::reload_slice() {
 // Read a 1-D variable into a series plotted as a line in the main window.
 void App::setup_line() {
     const NcVar &v = cur();
-    line_vals_ = nc_.read_series(v, fixed_, 0, 0, 0);   // whole variable along dim 0
+    line_vals_ = nc_.read_series(v, fixed_, 0, 0, 0, -1, -1); // whole var along dim 0
     int d = v.dimids[0];
     line_x_ = nc_.coord_values(d);
     line_xunits_ = nc_.coord_units(d);
@@ -564,7 +618,8 @@ void App::layout() {
     double sy = cy + (ch - slider_area) + 8;
     double time_track_y = -1;
     if (v) {
-        for (int p = 0; p < v->ndims - 2; ++p) {
+        for (int p = 0; p < v->ndims; ++p) {
+            if (p == ydim_ || p == xdim_) continue;  // plotted axes get no slider
             Rect track{cx + gutter, sy + 8, cw - gutter - 230, 8};
             sliders_.push_back({track, p});
             if (p == anim_dim_) time_track_y = track.y;
@@ -1102,8 +1157,8 @@ void App::draw_plot() {
         cyp = std::clamp(cyp, 0, ny - 1);
         int srcrow = flip_y_ ? (ny - 1 - cyp) : cyp;
         double val = slice_.data[(size_t)srcrow * nx + cxp];
-        const std::string &yname = nc_.dim(v.dimids[v.ndims - 2]).name; // lat axis
-        const std::string &xname = nc_.dim(v.dimids[v.ndims - 1]).name; // lon axis
+        const std::string &yname = nc_.dim(v.dimids[ydim_]).name; // lat / row axis
+        const std::string &xname = nc_.dim(v.dimids[xdim_]).name; // lon / col axis
         std::string txt = "value: ";
         txt += std::isnan(val) ? "—" : fmt_num(val);
         if (!v.units.empty() && !std::isnan(val)) txt += " " + units_.pretty(v.units);
@@ -1993,7 +2048,7 @@ void App::open_ts_window(size_t yidx, size_t xidx) {
     for (int p = 0; p < v.ndims; ++p) total *= nc_.dim(v.dimids[p]).len;
     if (total > 1000000) draw_wait_overlay("Extracting time series…");
 
-    ts_vals_ = nc_.read_series(v, fixed_, sp, yidx, xidx);
+    ts_vals_ = nc_.read_series(v, fixed_, sp, yidx, xidx, ydim_, xdim_);
     if (ts_vals_.empty()) return;
 
     int sdimid = v.dimids[sp];
@@ -2017,8 +2072,8 @@ void App::open_ts_window(size_t yidx, size_t xidx) {
     ts_title_ = v.long_name.empty() ? v.name : (v.long_name + " (" + v.name + ")");
     if (!v.units.empty()) ts_title_ += "  [" + units_.pretty(v.units) + "]";
 
-    const std::string &yname = nc_.dim(v.dimids[v.ndims - 2]).name;
-    const std::string &xname = nc_.dim(v.dimids[v.ndims - 1]).name;
+    const std::string &yname = nc_.dim(v.dimids[ydim_]).name;
+    const std::string &xname = nc_.dim(v.dimids[xdim_]).name;
     std::string loc;
     if (yidx < ycoord_.size() && xidx < xcoord_.size())
         loc = yname + " " + fmt_num(ycoord_[yidx]) + ", " + xname + " " +
@@ -2026,7 +2081,7 @@ void App::open_ts_window(size_t yidx, size_t xidx) {
     loc += "  " + yname + "[" + std::to_string(yidx) + "] " + xname + "[" +
            std::to_string(xidx) + "]";
     for (int p = 0; p < v.ndims; ++p) {
-        if (p == sp || p == v.ndims - 1 || p == v.ndims - 2) continue;
+        if (p == sp || p == xdim_ || p == ydim_) continue;
         loc += "    " + nc_.dim(v.dimids[p]).name + " = " + dim_label(p, fixed_[p]);
     }
     ts_subtitle_ = loc;
