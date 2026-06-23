@@ -204,6 +204,16 @@ std::string NcFile::coord_attr(int dimid, const char *name) const {
     return read_text_att(vid, name);
 }
 
+// Replace embedded control whitespace (newlines, carriage returns, tabs) with
+// single spaces so multi-line attribute values such as `history` render as one
+// flowing line: the metadata view lays out one line per entry and soft-wraps to
+// the window, so a literal newline would otherwise overlap the following row.
+static std::string flatten_ws(std::string s) {
+    for (char &c : s)
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    return s;
+}
+
 // Format the value of one attribute (any numeric or text type) as a string.
 static std::string format_att_value(int ncid, int varid, const char *name) {
     nc_type type;
@@ -215,7 +225,7 @@ static std::string format_att_value(int ncid, int varid, const char *name) {
         if (nc_get_att_text(ncid, varid, name, &s[0]) != NC_NOERR) return {};
         size_t z = s.find('\0');
         if (z != std::string::npos) s.resize(z);
-        return "\"" + s + "\"";
+        return "\"" + flatten_ws(s) + "\"";
     }
     if (type == NC_STRING) {
         std::vector<char *> strs(len, nullptr);
@@ -224,7 +234,7 @@ static std::string format_att_value(int ncid, int varid, const char *name) {
         for (size_t i = 0; i < len; ++i) {
             if (i) out += ", ";
             out += "\"";
-            out += strs[i] ? strs[i] : "";
+            out += strs[i] ? flatten_ws(strs[i]) : "";
             out += "\"";
         }
         nc_free_string(len, strs.data());

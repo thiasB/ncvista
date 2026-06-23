@@ -103,6 +103,7 @@ coastline overlay](docs/screenshot.png)
 | Map projection    | `p` or the projection button (geographic data)|
 | Metadata window   | `m` / `i` or the ⓘ metadata button       |
 | Select metadata text | drag in the metadata window (copies to clipboard) |
+| Long attributes   | soft-wrap to the window width; resize to reflow |
 | Animation speed   | `+` / `-` or scroll wheel                |
 | Move a dimension  | drag the slider                          |
 | Inspect a cell    | hover the plot                           |

@@ -228,11 +228,13 @@ private:
     cairo_t *meta_cr_ = nullptr;
     int meta_w_ = 720, meta_h_ = 640;
     int meta_scroll_ = 0;                // pixels scrolled from top
-    std::vector<NcFile::MetaLine> meta_lines_;
+    std::vector<NcFile::MetaLine> meta_raw_;    // logical lines (one per attr)
+    std::vector<NcFile::MetaLine> meta_lines_;  // visual lines after soft-wrap
 
     void open_meta_window();
     void close_meta_window();
     void draw_meta();
+    void rewrap_meta();                  // rebuild meta_lines_ from meta_raw_
     void scroll_meta(int dy);
 
     // Mouse text selection in the metadata window (monospace, so columns map to
@@ -1823,7 +1825,7 @@ bool App::handle_edit_key(XKeyEvent &ev, KeySym ks) {
 
 void App::open_meta_window() {
     if (meta_win_) { XRaiseWindow(dpy_, meta_win_); return; }
-    meta_lines_ = nc_.metadata_lines();
+    meta_raw_ = nc_.metadata_lines();
     meta_scroll_ = 0;
 
     int screen = DefaultScreen(dpy_);
@@ -1873,6 +1875,43 @@ void App::open_meta_window() {
     meta_char_w_ = cw / 10.0;
     pango_font_description_free(desc);
     g_object_unref(layout);
+
+    rewrap_meta();   // now that the column width is known
+}
+
+// Rebuild the displayed (visual) lines from the logical lines, soft-wrapping
+// any that are wider than the window so long attributes such as `history` stay
+// fully visible without horizontal scrolling. Breaks fall on spaces where
+// possible; the break space is kept on the left chunk so concatenating the
+// chunks reproduces the original text, which keeps copy/paste faithful (see
+// meta_commit_selection). Re-run on resize.
+void App::rewrap_meta() {
+    meta_lines_.clear();
+    // Usable text width in characters (x0 left margin = 18, ~16 px on the right
+    // for the scrollbar gutter).
+    int avail = (meta_char_w_ > 0)
+                    ? (int)((meta_w_ - 18 - 16) / meta_char_w_) : 0;
+    const int wrap = std::max(24, avail);
+    for (const auto &raw : meta_raw_) {
+        if ((int)raw.text.size() <= wrap) { meta_lines_.push_back(raw); continue; }
+        size_t pos = 0, n = raw.text.size();
+        bool first = true;
+        while (pos < n) {
+            if ((int)(n - pos) <= wrap) {
+                meta_lines_.push_back({raw.kind, raw.text.substr(pos), !first});
+                break;
+            }
+            size_t window_end = pos + wrap;
+            size_t brk = raw.text.rfind(' ', window_end - 1);
+            size_t chunk_end = (brk != std::string::npos && brk >= pos)
+                                   ? brk + 1        // keep the space with this chunk
+                                   : window_end;    // no space: hard split
+            meta_lines_.push_back({raw.kind, raw.text.substr(pos, chunk_end - pos),
+                                   !first});
+            pos = chunk_end;
+            first = false;
+        }
+    }
 }
 
 void App::close_meta_window() {
@@ -1945,7 +1984,13 @@ void App::meta_commit_selection() {
         int a = (i == l0) ? std::clamp(c0, 0, len) : 0;
         int b = (i == l1) ? std::clamp(c1, 0, len) : len;
         out += t.substr(a, b - a);
-        if (i < l1) out += '\n';
+        // Join soft-wrapped continuations back onto their logical line; only a
+        // genuine line boundary gets a newline.
+        if (i < l1) {
+            bool next_cont = (i + 1 < (int)meta_lines_.size()) &&
+                             meta_lines_[i + 1].cont;
+            if (!next_cont) out += '\n';
+        }
     }
     meta_sel_text_ = out;
     if (!meta_sel_text_.empty()) {
@@ -2303,6 +2348,7 @@ int App::run() {
                             meta_w_ = ev.xconfigure.width;
                             meta_h_ = ev.xconfigure.height;
                             cairo_xlib_surface_set_size(meta_surf_, meta_w_, meta_h_);
+                            rewrap_meta();  // reflow to the new width
                             scroll_meta(0); // re-clamp
                         }
                         draw_meta();

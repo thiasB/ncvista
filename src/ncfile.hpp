@@ -90,7 +90,9 @@ public:
 
     // A line is one row of the metadata view; `kind` drives colouring:
     //   0 plain, 1 section header, 2 variable name, 3 attribute name, 4 dimension
-    struct MetaLine { int kind; std::string text; };
+    // `cont` marks a soft-wrapped continuation of the previous logical line
+    // (set by the viewer when wrapping, never by metadata_lines()).
+    struct MetaLine { int kind; std::string text; bool cont = false; };
     std::vector<MetaLine> metadata_lines() const;
 
     int ncid() const { return ncid_; }
