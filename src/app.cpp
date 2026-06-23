@@ -162,6 +162,7 @@ private:
     double vmin_ = 0, vmax_ = 1;
     int editing_ = 0;                   // 0 none, 1 editing min, 2 editing max
     std::string edit_buf_;
+    int edit_cursor_ = 0;               // caret position (byte index) in edit_buf_
 
     // Cached colormap-rendered field image, reused across redraws (e.g. resize)
     // and only rebuilt when the data or its appearance actually changes.
@@ -352,6 +353,7 @@ private:
     void on_key(KeySym ks);
     bool handle_edit_key(XKeyEvent &ev, KeySym ks); // returns false to commit/cancel
     void commit_edit();
+    int edit_index_from_x(const Rect &r, double mx); // caret index nearest a click
     void step_anim(int delta);
 
     std::string dim_label(int dimpos, size_t idx) const;
@@ -1476,7 +1478,11 @@ void App::draw_colorbar() {
         set_color(cr_, editing ? COL_ACCENT : COL_BORDER);
         cairo_set_line_width(cr_, editing ? 1.5 : 1);
         cairo_stroke(cr_);
-        std::string s = editing ? (val + "|") : val;
+        std::string s = val;
+        if (editing) {
+            size_t c = std::min((size_t)edit_cursor_, val.size());
+            s = val.substr(0, c) + "|" + val.substr(c);
+        }
         draw_text(cr_, s, r.x + 5, r.y + 3, editing ? RGB{1, 1, 1} : COL_TEXT, 13,
                   false, PANGO_ALIGN_LEFT, r.w - 8);
     };
@@ -1570,8 +1576,16 @@ void App::on_button(int bx, int by, int button) {
         }
         // Colorbar bound fields: click to edit min / max. The field is prefilled
         // with the current value (Enter applies, Esc cancels).
-        if (r_cbmax_.hit(bx, by)) { editing_ = 2; edit_buf_ = fmt_num(vmax_); return; }
-        if (r_cbmin_.hit(bx, by)) { editing_ = 1; edit_buf_ = fmt_num(vmin_); return; }
+        if (r_cbmax_.hit(bx, by)) {
+            if (editing_ != 2) { editing_ = 2; edit_buf_ = fmt_num(vmax_); }
+            edit_cursor_ = edit_index_from_x(r_cbmax_, bx);  // caret where clicked
+            return;
+        }
+        if (r_cbmin_.hit(bx, by)) {
+            if (editing_ != 1) { editing_ = 1; edit_buf_ = fmt_num(vmin_); }
+            edit_cursor_ = edit_index_from_x(r_cbmin_, bx);  // caret where clicked
+            return;
+        }
         if (editing_) commit_edit();  // clicking elsewhere commits the edit
 
         if (r_first_.hit(bx, by)) {
@@ -1796,27 +1810,60 @@ void App::commit_edit() {
     }
     editing_ = 0;
     edit_buf_.clear();
+    edit_cursor_ = 0;
+}
+
+// Byte index in edit_buf_ whose caret position is nearest the click x. The
+// field text is drawn at r.x + 5 in the 13 px Sans font, so prefix widths are
+// measured in that font to map the pixel back to a character boundary.
+int App::edit_index_from_x(const Rect &r, double mx) {
+    double rel = mx - (r.x + 5);
+    if (rel <= 0) return 0;
+    int best = 0;
+    double bestd = 1e18;
+    for (size_t i = 0; i <= edit_buf_.size(); ++i) {
+        double w, h;
+        text_size(cr_, edit_buf_.substr(0, i), 13, false, w, h);
+        double d = std::fabs(w - rel);
+        if (d < bestd) { bestd = d; best = (int)i; }
+    }
+    return best;
 }
 
 // Returns true while still editing; false once the edit is committed/cancelled.
 bool App::handle_edit_key(XKeyEvent &ev, KeySym ks) {
-    if (ks == XK_Escape) { editing_ = 0; edit_buf_.clear(); return false; }
+    int len = (int)edit_buf_.size();
+    edit_cursor_ = std::clamp(edit_cursor_, 0, len);
+    if (ks == XK_Escape) { editing_ = 0; edit_buf_.clear(); edit_cursor_ = 0; return false; }
     if (ks == XK_Return || ks == XK_KP_Enter) { commit_edit(); return false; }
     if (ks == XK_Tab) {                 // commit, then jump to the other bound
         commit_edit();
         return false;
     }
+    // Caret movement.
+    if (ks == XK_Left)  { if (edit_cursor_ > 0)  --edit_cursor_; return true; }
+    if (ks == XK_Right) { if (edit_cursor_ < len) ++edit_cursor_; return true; }
+    if (ks == XK_Home || ks == XK_Begin) { edit_cursor_ = 0;   return true; }
+    if (ks == XK_End)                    { edit_cursor_ = len; return true; }
+    // Deletion either side of the caret.
     if (ks == XK_BackSpace) {
-        if (!edit_buf_.empty()) edit_buf_.pop_back();
+        if (edit_cursor_ > 0) { edit_buf_.erase(edit_cursor_ - 1, 1); --edit_cursor_; }
         return true;
     }
+    if (ks == XK_Delete) {
+        if (edit_cursor_ < len) edit_buf_.erase(edit_cursor_, 1);
+        return true;
+    }
+    // Insert accepted numeric characters at the caret.
     char buf[8] = {0};
     int n = XLookupString(&ev, buf, sizeof(buf) - 1, nullptr, nullptr);
     for (int i = 0; i < n; ++i) {
         char c = buf[i];
         if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' ||
-            c == 'e' || c == 'E')
-            edit_buf_.push_back(c);
+            c == 'e' || c == 'E') {
+            edit_buf_.insert(edit_buf_.begin() + edit_cursor_, c);
+            ++edit_cursor_;
+        }
     }
     return true;
 }
