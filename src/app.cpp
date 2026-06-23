@@ -1435,9 +1435,20 @@ void App::draw_colorbar() {
     r_cmaprev_ = {R.x + 6, R.y + 6 + 2 * (btn_h + btn_gap), R.w - 12, btn_h};
     draw_button(cr_, r_cmaprev_, reversed_ ? "reverse ✓" : "reverse", reversed_, false);
 
-    const double reserve = 3 * btn_h + 2 * btn_gap + 14;  // space taken by the toggles
-    double barx = R.x + 8, bary = R.y + 24 + reserve;
-    double barw = 22, barh = R.h - 48 - reserve;
+    // Editable max/min fields span the full panel width, left-aligned, placed
+    // above and below the colour scale so they have room to be wide. The scale
+    // fills the gap between them.
+    const double fh = 22, fgap = 6;
+    double fields_x = R.x + 6, fields_w = R.w - 12;
+    double toggles_bottom = R.y + 6 + 3 * (btn_h + btn_gap);
+    double max_y = toggles_bottom + fgap;            // max field above the scale
+    double min_y = R.y + R.h - fh - 6;               // min field at the panel foot
+    r_cbmax_ = {fields_x, max_y, fields_w, fh};
+    r_cbmin_ = {fields_x, min_y, fields_w, fh};
+
+    double barx = R.x + 8, barw = 22;
+    double bary = max_y + fh + fgap;
+    double barh = std::max(10.0, (min_y - fgap) - bary);
     const Palette &cm = cmaps_[cmap_idx_];
 
     for (int i = 0; i < (int)barh; ++i) {
@@ -1453,12 +1464,8 @@ void App::draw_colorbar() {
     cairo_rectangle(cr_, barx, bary, barw, barh);
     cairo_stroke(cr_);
 
-    // Editable max (top) and min (bottom) fields, plus interior ticks.
+    // Interior tick labels, drawn to the right of the colour scale.
     double fx = barx + barw + 7;
-    double fw = std::max(46.0, R.x + R.w - fx - 2);
-    r_cbmax_ = {fx, bary - 11, fw, 22};
-    r_cbmin_ = {fx, bary + barh - 11, fw, 22};
-
     const int nticks = 6;
     for (int i = 1; i < nticks - 1; ++i) {
         double f = (double)i / (nticks - 1);
