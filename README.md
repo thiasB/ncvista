@@ -19,6 +19,9 @@ coastline overlay](docs/screenshot.png)
   are detected, dimmed, and sorted to the end; the initial selection is always a
   real data field. The list scrolls (mouse wheel or a draggable scrollbar) and a
   hover tooltip shows the full name and units when an entry is truncated.
+- Reads any format the netCDF C library exposes: classic/64-bit, netCDF-4/HDF5,
+  and — when the library is built with NCzarr — Zarr stores (local `.zarr`
+  directories and remote/S3 URLs). See [Usage](#usage).
 - 2-D field rendering of the last two dimensions, aspect-ratio preserved.
 - 1-D variables are shown as a line plot filling the main window (the same chart
   as the time-series window), with a calendar/numeric x-axis.
@@ -177,6 +180,21 @@ where `$PREFIX` is your netCDF/udunits install prefix.
 ./build/ncvista FILE.nc
 ./build/ncvista --version   # print the version and exit
 ```
+
+### NCzarr / Zarr stores
+
+If the netCDF library was built with NCzarr support (`nc-config --has-nczarr`
+reports `yes`), Zarr datasets can be opened too:
+
+```sh
+./build/ncvista data.zarr                              # local store, by path
+./build/ncvista 'file:///abs/path/data.zarr#mode=nczarr,file'   # explicit URL
+./build/ncvista 's3://bucket/key#mode=nczarr,s3'       # remote (needs libcurl)
+```
+
+A plain `.zarr` directory path is automatically opened as an NCzarr `file`
+store; the full `file://…#mode=nczarr,…` URL form is also accepted, as is any
+other URL the library understands (e.g. `s3://`, `zip`).
 
 A test file generator is included:
 

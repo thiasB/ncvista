@@ -2,10 +2,34 @@
 #include <netcdf.h>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <set>
 #include <string>
+#include <sys/stat.h>
+
+// If `path` is a local NCzarr directory store (a directory, or a name ending in
+// .zarr) and not already a URL, return the canonical NCzarr URL the netCDF
+// library understands (plain directory paths are not auto-detected as Zarr);
+// otherwise return "". Used as an open fallback so users can pass `data.zarr`.
+static std::string nczarr_url_for(const std::string &path) {
+    if (path.find("://") != std::string::npos ||
+        path.find("#mode=") != std::string::npos)
+        return {};                       // already a URL / explicit open mode
+    auto ends_with = [&](const char *s) {
+        size_t n = std::strlen(s);
+        return path.size() >= n && path.compare(path.size() - n, n, s) == 0;
+    };
+    struct stat st;
+    bool is_dir = (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
+    if (!is_dir && !ends_with(".zarr") && !ends_with(".zarr/")) return {};
+    char *abs = realpath(path.c_str(), nullptr);
+    if (!abs) return {};
+    std::string url = "file://" + std::string(abs) + "#mode=nczarr,file";
+    free(abs);
+    return url;
+}
 
 NcFile::~NcFile() { close(); }
 
@@ -34,6 +58,11 @@ std::string NcFile::read_text_att(int varid, const char *name) const {
 bool NcFile::open(const std::string &path, std::string &err) {
     close();
     int rc = nc_open(path.c_str(), NC_NOWRITE, &ncid_);
+    if (rc != NC_NOERR) {
+        // Retry as an NCzarr store if the path looks like one (e.g. data.zarr).
+        std::string url = nczarr_url_for(path);
+        if (!url.empty()) rc = nc_open(url.c_str(), NC_NOWRITE, &ncid_);
+    }
     if (rc != NC_NOERR) {
         err = std::string("nc_open: ") + nc_strerror(rc);
         ncid_ = -1;
