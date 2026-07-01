@@ -260,7 +260,12 @@ private:
     std::string ts_xunits_, ts_xcal_;
     std::string ts_title_, ts_subtitle_;
     int ts_cur_idx_ = -1;                // index to highlight (current frame)
+    int ts_hover_idx_ = -1;              // sample under the mouse pointer (-1 = none)
     double ts_ymin_ = 0, ts_ymax_ = 1;
+
+    // Plot-area geometry from the last draw_series call, kept for hover hit-testing.
+    double sr_px0_ = 0, sr_py0_ = 0, sr_pw_ = 0, sr_ph_ = 0;
+    int sr_n_ = 0;
 
     void open_ts_window(size_t yidx, size_t xidx);
     void close_ts_window();
@@ -271,7 +276,8 @@ private:
     void draw_series(cairo_t *cr, const Rect &R,
                      const std::vector<double> &xv, const std::vector<double> &yv,
                      double ymin, double ymax, bool is_time,
-                     const std::string &xunits, const std::string &xcal, int cur_idx);
+                     const std::string &xunits, const std::string &xcal, int cur_idx,
+                     int hover_idx = -1);
 
     // ---- 1-D variable shown as a line plot in the main window ------------
     std::vector<double> line_vals_, line_x_;
@@ -2190,7 +2196,7 @@ void App::open_ts_window(size_t yidx, size_t xidx) {
         XSetWindowAttributes attrs;
         attrs.background_pixel = BlackPixel(dpy_, screen);
         attrs.event_mask = ExposureMask | KeyPressMask | ButtonPressMask |
-                           StructureNotifyMask;
+                           PointerMotionMask | LeaveWindowMask | StructureNotifyMask;
         ts_win_ = XCreateWindow(dpy_, RootWindow(dpy_, screen), 0, 0, ts_w_, ts_h_,
                                 0, DefaultDepth(dpy_, screen), InputOutput,
                                 DefaultVisual(dpy_, screen),
@@ -2232,7 +2238,7 @@ void App::draw_ts() {
 
     Rect R{0, 46, (double)ts_w_, (double)ts_h_ - 46};
     draw_series(cr, R, ts_x_, ts_vals_, ts_ymin_, ts_ymax_, ts_is_time_,
-                ts_xunits_, ts_xcal_, ts_cur_idx_);
+                ts_xunits_, ts_xcal_, ts_cur_idx_, ts_hover_idx_);
 
     cairo_surface_flush(ts_surf_);
     XFlush(dpy_);
@@ -2243,13 +2249,15 @@ void App::draw_ts() {
 void App::draw_series(cairo_t *cr, const Rect &R,
                       const std::vector<double> &xv, const std::vector<double> &yv,
                       double ymin, double ymax, bool is_time,
-                      const std::string &xunits, const std::string &xcal, int cur_idx) {
+                      const std::string &xunits, const std::string &xcal, int cur_idx,
+                      int hover_idx) {
     const double ml = 64, mr = 16, mt = 10, mb = 34;
     double px0 = R.x + ml, py0 = R.y + mt, pw = R.w - ml - mr, ph = R.h - mt - mb;
     if (pw < 20 || ph < 20) return;
     if (ymax <= ymin) ymax = ymin + 1;
 
     int n = (int)yv.size();
+    sr_px0_ = px0; sr_py0_ = py0; sr_pw_ = pw; sr_ph_ = ph; sr_n_ = n;
     auto xmap = [&](int i) { return px0 + (n > 1 ? (double)i / (n - 1) : 0.5) * pw; };
     auto ymap = [&](double val) { return py0 + ph - (val - ymin) / (ymax - ymin) * ph; };
 
@@ -2329,6 +2337,54 @@ void App::draw_series(cairo_t *cr, const Rect &R,
             cairo_arc(cr, x, y, i == cur_idx ? 4 : 2.5, 0, 2 * M_PI);
             cairo_fill(cr);
         }
+    }
+
+    // Hover indicator: a vertical cursor line at the pointed sample plus a bubble
+    // showing its x coordinate and value.
+    if (hover_idx >= 0 && hover_idx < n) {
+        double x = xmap(hover_idx);
+        set_color(cr, COL_TEXT, 0.55);
+        cairo_set_line_width(cr, 1);
+        cairo_move_to(cr, x, py0); cairo_line_to(cr, x, py0 + ph);
+        cairo_stroke(cr);
+
+        bool has = !std::isnan(yv[hover_idx]);
+        double y = has ? ymap(yv[hover_idx]) : py0 + ph / 2;
+        if (has) {
+            set_color(cr, RGB{1, 1, 1});
+            cairo_arc(cr, x, y, 3.5, 0, 2 * M_PI);
+            cairo_fill(cr);
+        }
+
+        std::string xl;
+        if (is_time && hover_idx < (int)xv.size())
+            xl = units_.format_time(xunits, xcal, xv[hover_idx]);
+        else if (hover_idx < (int)xv.size())
+            xl = fmt_num(xv[hover_idx]);
+        else
+            xl = std::to_string(hover_idx);
+        std::string yl = has ? fmt_num(yv[hover_idx]) : std::string("missing");
+
+        double w1, h1, w2, h2;
+        text_size(cr, xl, 11, false, w1, h1);
+        text_size(cr, yl, 12, true, w2, h2);
+        double pad = 7;
+        double bw = std::max(w1, w2) + 2 * pad, bh = h1 + h2 + 2 * pad + 2;
+        double bx = x + 12, by = (has ? y : py0 + 10) - bh / 2;
+        if (bx + bw > px0 + pw) bx = x - 12 - bw;   // flip left near the right edge
+        bx = std::clamp(bx, px0 + 2, px0 + pw - bw - 2);
+        by = std::clamp(by, py0 + 2, py0 + ph - bh - 2);
+
+        set_color(cr, COL_PANEL2, 0.95);
+        rounded_rect(cr, bx, by, bw, bh, 5);
+        cairo_fill(cr);
+        set_color(cr, COL_BORDER);
+        cairo_set_line_width(cr, 1);
+        rounded_rect(cr, bx, by, bw, bh, 5);
+        cairo_stroke(cr);
+
+        draw_text(cr, xl, bx + pad, by + pad, COL_TEXT_DIM, 11);
+        draw_text(cr, yl, bx + pad, by + pad + h1 + 2, COL_TEXT, 12, true);
     }
 }
 
@@ -2501,6 +2557,27 @@ int App::run() {
                             cairo_xlib_surface_set_size(ts_surf_, ts_w_, ts_h_);
                         }
                         draw_ts();
+                        break;
+                    case MotionNotify: {
+                        // Coalesce queued motions so a fast move redraws once.
+                        XEvent latest = ev;
+                        while (XCheckTypedWindowEvent(dpy_, ts_win_, MotionNotify,
+                                                      &latest))
+                            ;
+                        int mx = latest.xmotion.x, my = latest.xmotion.y;
+                        int idx = -1;
+                        if (sr_n_ > 0 && sr_pw_ > 0 &&
+                            mx >= sr_px0_ - 4 && mx <= sr_px0_ + sr_pw_ + 4 &&
+                            my >= sr_py0_ && my <= sr_py0_ + sr_ph_) {
+                            double f = (mx - sr_px0_) / sr_pw_;
+                            idx = (sr_n_ > 1) ? (int)std::lround(f * (sr_n_ - 1)) : 0;
+                            idx = std::clamp(idx, 0, sr_n_ - 1);
+                        }
+                        if (idx != ts_hover_idx_) { ts_hover_idx_ = idx; draw_ts(); }
+                        break;
+                    }
+                    case LeaveNotify:
+                        if (ts_hover_idx_ != -1) { ts_hover_idx_ = -1; draw_ts(); }
                         break;
                     case KeyPress: {
                         KeySym tk = XLookupKeysym(&ev.xkey, 0);
