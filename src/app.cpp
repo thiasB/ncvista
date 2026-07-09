@@ -173,6 +173,15 @@ private:
     double img_vmin_ = 0, img_vmax_ = 0;
     bool img_flip_ = false;
     bool img_rev_ = false;
+    long img_gen_ = 0;                  // bumped whenever data_img_ is rebuilt
+
+    // Display-resolution downscale of data_img_, used when the visible crop has
+    // more grid cells than on-screen pixels. Pushing this (rather than the full
+    // grid) to the X server slashes per-frame bandwidth on remote (SSH) displays.
+    cairo_surface_t *data_scaled_ = nullptr;
+    long ds_gen_ = -1;                  // img_gen_ the scaled copy was built from
+    int ds_iw_ = 0, ds_ih_ = 0;        // scaled-surface size (device pixels)
+    double ds_vx0_ = 0, ds_vy0_ = 0, ds_vw_ = 0, ds_vh_ = 0;  // source crop it covers
 
     std::vector<double> ycoord_, xcoord_;
     Coastlines coast_, borders_;
@@ -1092,6 +1101,7 @@ void App::draw_plot() {
         img_vmin_ = vmin_; img_vmax_ = vmax_; img_flip_ = flip_y_;
         img_rev_ = reversed_;
         img_nx_ = nx; img_ny_ = ny;
+        ++img_gen_;   // invalidate any display-resolution downscale
     }
 
     // Visible window in image-pixel space (full image unless zoomed in).
@@ -1110,14 +1120,54 @@ void App::draw_plot() {
     plot_ox_ = ox; plot_oy_ = oy; plot_s_ = s; plot_dw_ = dw; plot_dh_ = dh;
     plot_nx_ = nx; plot_ny_ = ny; plot_vx0_ = vx0; plot_vy0_ = vy0;
 
+    // Choose what to push to the X server. On a remote (SSH) display the field
+    // bitmap crosses the wire on each frame; when the visible crop holds more
+    // grid cells than on-screen pixels (s < 1), first downscale it client-side
+    // to display resolution so only ~(dw x dh) pixels travel instead of nx x ny.
+    // NEAREST is used throughout, so the picked cells match the previous direct
+    // server-side downscale — no change in appearance, just far fewer bytes.
+    cairo_surface_t *src = data_img_;
+    double sx = s, sy = s, tx = -vx0, ty = -vy0;
+    if (s < 0.98 && dw >= 1 && dh >= 1) {
+        int iw = std::max(1, (int)std::lround(dw));
+        int ih = std::max(1, (int)std::lround(dh));
+        bool ds_stale = !data_scaled_ || ds_gen_ != img_gen_ ||
+                        ds_iw_ != iw || ds_ih_ != ih ||
+                        ds_vx0_ != vx0 || ds_vy0_ != vy0 ||
+                        ds_vw_ != vw || ds_vh_ != vh;
+        if (ds_stale) {
+            // Reuse the surface across frames when its size is unchanged (the
+            // common case during animation) to avoid per-frame reallocation.
+            if (data_scaled_ && (ds_iw_ != iw || ds_ih_ != ih)) {
+                cairo_surface_destroy(data_scaled_);
+                data_scaled_ = nullptr;
+            }
+            if (!data_scaled_)
+                data_scaled_ = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw, ih);
+            cairo_t *dc = cairo_create(data_scaled_);
+            cairo_set_operator(dc, CAIRO_OPERATOR_SOURCE);  // overwrite prior frame
+            cairo_scale(dc, iw / vw, ih / vh);
+            cairo_translate(dc, -vx0, -vy0);
+            cairo_set_source_surface(dc, data_img_, 0, 0);
+            cairo_pattern_set_filter(cairo_get_source(dc), CAIRO_FILTER_NEAREST);
+            cairo_paint(dc);
+            cairo_destroy(dc);
+            cairo_surface_flush(data_scaled_);
+            ds_gen_ = img_gen_; ds_iw_ = iw; ds_ih_ = ih;
+            ds_vx0_ = vx0; ds_vy0_ = vy0; ds_vw_ = vw; ds_vh_ = vh;
+        }
+        src = data_scaled_;
+        sx = dw / iw; sy = dh / ih; tx = 0; ty = 0;
+    }
+
     cairo_save(cr_);
     // Clip to the visible image rect so the zoomed crop shows only that region.
     cairo_rectangle(cr_, ox, oy, dw, dh);
     cairo_clip(cr_);
     cairo_translate(cr_, ox, oy);
-    cairo_scale(cr_, s, s);
-    cairo_translate(cr_, -vx0, -vy0);
-    cairo_set_source_surface(cr_, data_img_, 0, 0);
+    cairo_scale(cr_, sx, sy);
+    cairo_translate(cr_, tx, ty);
+    cairo_set_source_surface(cr_, src, 0, 0);
     cairo_pattern_set_filter(cairo_get_source(cr_), CAIRO_FILTER_NEAREST);
     cairo_paint(cr_);
     cairo_restore(cr_);
@@ -2744,6 +2794,7 @@ int App::run() {
     close_meta_window();
     close_ts_window();
     if (data_img_) cairo_surface_destroy(data_img_);
+    if (data_scaled_) cairo_surface_destroy(data_scaled_);
     if (proj_img_) cairo_surface_destroy(proj_img_);
     if (coast_ov_.img) cairo_surface_destroy(coast_ov_.img);
     if (borders_ov_.img) cairo_surface_destroy(borders_ov_.img);
