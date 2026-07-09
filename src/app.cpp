@@ -263,21 +263,30 @@ private:
     int ts_hover_idx_ = -1;              // sample under the mouse pointer (-1 = none)
     double ts_ymin_ = 0, ts_ymax_ = 1;
 
-    // Plot-area geometry from the last draw_series call, kept for hover hit-testing.
+    // Plot-area geometry from the last chart render, kept for hover hit-testing.
     double sr_px0_ = 0, sr_py0_ = 0, sr_pw_ = 0, sr_ph_ = 0;
     int sr_n_ = 0;
+
+    // Cached static chart. The chart (axes, series, current-frame marker) only
+    // changes on open/resize, so it is rendered once into an offscreen pixmap and
+    // re-blitted on hover; only the thin cursor line + value bubble are redrawn
+    // per mouse move. This keeps mouse tracking cheap over remote (SSH) displays.
+    cairo_surface_t *ts_cache_ = nullptr;
+    int ts_cache_w_ = 0, ts_cache_h_ = 0;
+    bool ts_cache_dirty_ = true;
 
     void open_ts_window(size_t yidx, size_t xidx);
     void close_ts_window();
     void draw_ts();
+    void build_ts_cache();             // (re)render the static chart into ts_cache_
+    void draw_ts_hover();              // overlay cursor line + bubble for ts_hover_idx_
 
     // Reusable line-chart renderer (used by the time-series window and by the
     // main plot when the current variable is 1-D).
     void draw_series(cairo_t *cr, const Rect &R,
                      const std::vector<double> &xv, const std::vector<double> &yv,
                      double ymin, double ymax, bool is_time,
-                     const std::string &xunits, const std::string &xcal, int cur_idx,
-                     int hover_idx = -1);
+                     const std::string &xunits, const std::string &xcal, int cur_idx);
 
     // ---- 1-D variable shown as a line plot in the main window ------------
     std::vector<double> line_vals_, line_x_;
@@ -2215,20 +2224,33 @@ void App::open_ts_window(size_t yidx, size_t xidx) {
     } else {
         XRaiseWindow(dpy_, ts_win_);
     }
+    ts_hover_idx_ = -1;
+    ts_cache_dirty_ = true;   // new series / location: rebuild the cached chart
     draw_ts();
 }
 
 void App::close_ts_window() {
     if (!ts_win_) return;
+    if (ts_cache_) { cairo_surface_destroy(ts_cache_); ts_cache_ = nullptr; }
+    ts_cache_w_ = ts_cache_h_ = 0; ts_cache_dirty_ = true;
     if (ts_cr_) { cairo_destroy(ts_cr_); ts_cr_ = nullptr; }
     if (ts_surf_) { cairo_surface_destroy(ts_surf_); ts_surf_ = nullptr; }
     XDestroyWindow(dpy_, ts_win_);
     ts_win_ = 0;
 }
 
-void App::draw_ts() {
-    if (!ts_cr_) return;
-    cairo_t *cr = ts_cr_;
+// Render the static chart (background, titles, axes, series, current-frame
+// marker) into the offscreen cache. Also records the plot-area geometry (sr_*)
+// used to place the hover cursor.
+void App::build_ts_cache() {
+    if (!ts_surf_) return;
+    if (!ts_cache_ || ts_cache_w_ != ts_w_ || ts_cache_h_ != ts_h_) {
+        if (ts_cache_) cairo_surface_destroy(ts_cache_);
+        ts_cache_ = cairo_surface_create_similar(ts_surf_, CAIRO_CONTENT_COLOR,
+                                                 ts_w_, ts_h_);
+        ts_cache_w_ = ts_w_; ts_cache_h_ = ts_h_;
+    }
+    cairo_t *cr = cairo_create(ts_cache_);
     set_color(cr, COL_BG);
     cairo_paint(cr);
 
@@ -2238,10 +2260,86 @@ void App::draw_ts() {
 
     Rect R{0, 46, (double)ts_w_, (double)ts_h_ - 46};
     draw_series(cr, R, ts_x_, ts_vals_, ts_ymin_, ts_ymax_, ts_is_time_,
-                ts_xunits_, ts_xcal_, ts_cur_idx_, ts_hover_idx_);
+                ts_xunits_, ts_xcal_, ts_cur_idx_);
+    cairo_destroy(cr);
+    ts_cache_dirty_ = false;
+}
+
+void App::draw_ts() {
+    if (!ts_cr_) return;
+    if (ts_cache_dirty_ || !ts_cache_ ||
+        ts_cache_w_ != ts_w_ || ts_cache_h_ != ts_h_)
+        build_ts_cache();
+
+    // Blit the cached chart, then overlay only the (cheap) hover cursor.
+    cairo_set_source_surface(ts_cr_, ts_cache_, 0, 0);
+    cairo_set_operator(ts_cr_, CAIRO_OPERATOR_SOURCE);
+    cairo_paint(ts_cr_);
+    cairo_set_operator(ts_cr_, CAIRO_OPERATOR_OVER);
+    if (ts_hover_idx_ >= 0) draw_ts_hover();
 
     cairo_surface_flush(ts_surf_);
     XFlush(dpy_);
+}
+
+// Overlay the vertical cursor line and a value bubble for the hovered sample.
+// Drawn straight onto the window over the blitted cache, using the plot geometry
+// recorded by the last build_ts_cache().
+void App::draw_ts_hover() {
+    cairo_t *cr = ts_cr_;
+    int n = sr_n_, idx = ts_hover_idx_;
+    if (idx < 0 || idx >= n || sr_pw_ <= 0 || ts_ymax_ <= ts_ymin_) return;
+
+    auto xmap = [&](int i) {
+        return sr_px0_ + (n > 1 ? (double)i / (n - 1) : 0.5) * sr_pw_;
+    };
+    auto ymap = [&](double v) {
+        return sr_py0_ + sr_ph_ - (v - ts_ymin_) / (ts_ymax_ - ts_ymin_) * sr_ph_;
+    };
+
+    double x = xmap(idx);
+    set_color(cr, COL_TEXT, 0.55);
+    cairo_set_line_width(cr, 1);
+    cairo_move_to(cr, x, sr_py0_); cairo_line_to(cr, x, sr_py0_ + sr_ph_);
+    cairo_stroke(cr);
+
+    bool has = idx < (int)ts_vals_.size() && !std::isnan(ts_vals_[idx]);
+    double y = has ? ymap(ts_vals_[idx]) : sr_py0_ + sr_ph_ / 2;
+    if (has) {
+        set_color(cr, RGB{1, 1, 1});
+        cairo_arc(cr, x, y, 3.5, 0, 2 * M_PI);
+        cairo_fill(cr);
+    }
+
+    std::string xl;
+    if (ts_is_time_ && idx < (int)ts_x_.size())
+        xl = units_.format_time(ts_xunits_, ts_xcal_, ts_x_[idx]);
+    else if (idx < (int)ts_x_.size())
+        xl = fmt_num(ts_x_[idx]);
+    else
+        xl = std::to_string(idx);
+    std::string yl = has ? fmt_num(ts_vals_[idx]) : std::string("missing");
+
+    double w1, h1, w2, h2;
+    text_size(cr, xl, 11, false, w1, h1);
+    text_size(cr, yl, 12, true, w2, h2);
+    double pad = 7;
+    double bw = std::max(w1, w2) + 2 * pad, bh = h1 + h2 + 2 * pad + 2;
+    double bx = x + 12, by = (has ? y : sr_py0_ + 10) - bh / 2;
+    if (bx + bw > sr_px0_ + sr_pw_) bx = x - 12 - bw;   // flip left near right edge
+    bx = std::clamp(bx, sr_px0_ + 2, sr_px0_ + sr_pw_ - bw - 2);
+    by = std::clamp(by, sr_py0_ + 2, sr_py0_ + sr_ph_ - bh - 2);
+
+    set_color(cr, COL_PANEL2, 0.95);
+    rounded_rect(cr, bx, by, bw, bh, 5);
+    cairo_fill(cr);
+    set_color(cr, COL_BORDER);
+    cairo_set_line_width(cr, 1);
+    rounded_rect(cr, bx, by, bw, bh, 5);
+    cairo_stroke(cr);
+
+    draw_text(cr, xl, bx + pad, by + pad, COL_TEXT_DIM, 11);
+    draw_text(cr, yl, bx + pad, by + pad + h1 + 2, COL_TEXT, 12, true);
 }
 
 // Draw a line chart of (xv, yv) within rectangle R. cur_idx (>= 0) highlights a
@@ -2249,8 +2347,7 @@ void App::draw_ts() {
 void App::draw_series(cairo_t *cr, const Rect &R,
                       const std::vector<double> &xv, const std::vector<double> &yv,
                       double ymin, double ymax, bool is_time,
-                      const std::string &xunits, const std::string &xcal, int cur_idx,
-                      int hover_idx) {
+                      const std::string &xunits, const std::string &xcal, int cur_idx) {
     const double ml = 64, mr = 16, mt = 10, mb = 34;
     double px0 = R.x + ml, py0 = R.y + mt, pw = R.w - ml - mr, ph = R.h - mt - mb;
     if (pw < 20 || ph < 20) return;
@@ -2337,54 +2434,6 @@ void App::draw_series(cairo_t *cr, const Rect &R,
             cairo_arc(cr, x, y, i == cur_idx ? 4 : 2.5, 0, 2 * M_PI);
             cairo_fill(cr);
         }
-    }
-
-    // Hover indicator: a vertical cursor line at the pointed sample plus a bubble
-    // showing its x coordinate and value.
-    if (hover_idx >= 0 && hover_idx < n) {
-        double x = xmap(hover_idx);
-        set_color(cr, COL_TEXT, 0.55);
-        cairo_set_line_width(cr, 1);
-        cairo_move_to(cr, x, py0); cairo_line_to(cr, x, py0 + ph);
-        cairo_stroke(cr);
-
-        bool has = !std::isnan(yv[hover_idx]);
-        double y = has ? ymap(yv[hover_idx]) : py0 + ph / 2;
-        if (has) {
-            set_color(cr, RGB{1, 1, 1});
-            cairo_arc(cr, x, y, 3.5, 0, 2 * M_PI);
-            cairo_fill(cr);
-        }
-
-        std::string xl;
-        if (is_time && hover_idx < (int)xv.size())
-            xl = units_.format_time(xunits, xcal, xv[hover_idx]);
-        else if (hover_idx < (int)xv.size())
-            xl = fmt_num(xv[hover_idx]);
-        else
-            xl = std::to_string(hover_idx);
-        std::string yl = has ? fmt_num(yv[hover_idx]) : std::string("missing");
-
-        double w1, h1, w2, h2;
-        text_size(cr, xl, 11, false, w1, h1);
-        text_size(cr, yl, 12, true, w2, h2);
-        double pad = 7;
-        double bw = std::max(w1, w2) + 2 * pad, bh = h1 + h2 + 2 * pad + 2;
-        double bx = x + 12, by = (has ? y : py0 + 10) - bh / 2;
-        if (bx + bw > px0 + pw) bx = x - 12 - bw;   // flip left near the right edge
-        bx = std::clamp(bx, px0 + 2, px0 + pw - bw - 2);
-        by = std::clamp(by, py0 + 2, py0 + ph - bh - 2);
-
-        set_color(cr, COL_PANEL2, 0.95);
-        rounded_rect(cr, bx, by, bw, bh, 5);
-        cairo_fill(cr);
-        set_color(cr, COL_BORDER);
-        cairo_set_line_width(cr, 1);
-        rounded_rect(cr, bx, by, bw, bh, 5);
-        cairo_stroke(cr);
-
-        draw_text(cr, xl, bx + pad, by + pad, COL_TEXT_DIM, 11);
-        draw_text(cr, yl, bx + pad, by + pad + h1 + 2, COL_TEXT, 12, true);
     }
 }
 
@@ -2555,6 +2604,7 @@ int App::run() {
                             ts_w_ = ev.xconfigure.width;
                             ts_h_ = ev.xconfigure.height;
                             cairo_xlib_surface_set_size(ts_surf_, ts_w_, ts_h_);
+                            ts_cache_dirty_ = true;   // chart must be re-laid-out
                         }
                         draw_ts();
                         break;
