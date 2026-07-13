@@ -46,13 +46,25 @@ std::string NcFile::read_text_att(int varid, const char *name) const {
     int type;
     size_t len = 0;
     if (nc_inq_att(ncid_, varid, name, &type, &len) != NC_NOERR) return {};
-    if (type != NC_CHAR || len == 0) return {};
-    std::string s(len, '\0');
-    if (nc_get_att_text(ncid_, varid, name, &s[0]) != NC_NOERR) return {};
-    // Trim trailing NULs.
-    size_t z = s.find('\0');
-    if (z != std::string::npos) s.resize(z);
-    return s;
+    if (len == 0) return {};
+    if (type == NC_CHAR) {
+        std::string s(len, '\0');
+        if (nc_get_att_text(ncid_, varid, name, &s[0]) != NC_NOERR) return {};
+        // Trim trailing NULs.
+        size_t z = s.find('\0');
+        if (z != std::string::npos) s.resize(z);
+        return s;
+    }
+    // netCDF-4 / NCZarr files (e.g. written by xarray) often store text
+    // attributes as NC_STRING rather than NC_CHAR; take the first element.
+    if (type == NC_STRING) {
+        std::vector<char *> strs(len, nullptr);
+        if (nc_get_att_string(ncid_, varid, name, strs.data()) != NC_NOERR) return {};
+        std::string s = strs[0] ? strs[0] : "";
+        nc_free_string(len, strs.data());
+        return s;
+    }
+    return {};
 }
 
 bool NcFile::open(const std::string &path, std::string &err) {
