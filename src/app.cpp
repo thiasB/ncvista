@@ -1456,17 +1456,23 @@ void App::draw_overlay_proj(const Coastlines &src, const RGB &core,
     cairo_set_line_cap(cr_, CAIRO_LINE_CAP_ROUND);
     if (dashed) cairo_set_dash(cr_, dashes, 2, 0.0);
 
+    // Break a segment when its endpoints jump more than half the map width in
+    // pixels. This catches the seam wherever it falls — including the prime
+    // meridian introduced when 0..360 data centres the map on lon0 ~ 180 — for
+    // which a raw-longitude test (e.g. |lon - plon| > 90) fails, because the two
+    // points straddling that seam differ by only a fraction of a degree yet land
+    // on opposite edges.
+    const double maxjump = dw * 0.5;
     auto build = [&]() {
         for (const auto &line : src.lines) {
             bool pen = false;
-            double plon = 0;
+            double ppx = 0;
             for (const auto &pt : line) {
-                double lon = pt.first, lat = pt.second;
-                double px, py; project(lon, lat, px, py);
-                if (pen && std::fabs(lon - plon) > 90.0) pen = false;  // antimeridian
+                double px, py; project(pt.first, pt.second, px, py);
+                if (pen && std::fabs(px - ppx) > maxjump) pen = false;  // seam wrap
                 if (pen) cairo_line_to(cr_, px, py);
                 else cairo_move_to(cr_, px, py);
-                pen = true; plon = lon;
+                pen = true; ppx = px;
             }
         }
     };
