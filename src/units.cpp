@@ -69,6 +69,38 @@ bool Units::is_time(const std::string &spec) const {
     return conv;
 }
 
+// ---- Proleptic Gregorian day arithmetic (Howard Hinnant's algorithms) ------
+
+static long days_from_civil(int y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    long era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (153u * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (long)doe - 719468;
+}
+
+static void civil_from_days(long z, int &y, unsigned &m, unsigned &d) {
+    z += 719468;
+    long era = (z >= 0 ? z : z - 146096) / 146097;
+    unsigned doe = (unsigned)(z - era * 146097);
+    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y = (int)yoe + (int)(era * 400);
+    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    unsigned mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp + (mp < 10 ? 3 : -9);
+    y += (m <= 2);
+}
+
+static bool is_leap(int y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
+static int days_in_year(int y) { return is_leap(y) ? 366 : 365; }
+static int days_in_month(int y, int m) {
+    static const int md[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (m == 2 && is_leap(y)) return 29;
+    return md[(m - 1) % 12];
+}
+
 static std::string fmt_date(int y, int mo, int d, int h, int mi, double s) {
     char buf[64];
     if (h == 0 && mi == 0 && s < 0.5)
@@ -86,6 +118,15 @@ std::string Units::format_time(const std::string &spec, const std::string &calen
 
     const bool standard = cal.empty() || cal == "standard" || cal == "gregorian" ||
                           cal == "proleptic_gregorian" || cal == "julian";
+
+    // "years since"/"months since" need calendar-aware handling: udunits treats
+    // a year as a fixed 365.2422-day duration, which drifts from the civil
+    // calendar (e.g. index 499 of "years since 1601-01-01" -> 2099-12-31
+    // 20:34:21 rather than 2100-01-01). Advance whole calendar years/months.
+    if (standard) {
+        std::string out = format_time_year_month(spec, value);
+        if (!out.empty()) return out;
+    }
 
     if (sys_ && ref_ && standard) {
         ut_unit *u = ut_parse((ut_system *)sys_, spec.c_str(), UT_ASCII);
@@ -117,6 +158,67 @@ std::string Units::format_time(const std::string &spec, const std::string &calen
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%g", value);
     return buf;
+}
+
+// Advance whole calendar years/months from the reference date. Any fractional
+// part of `value` is applied as a fraction of the length of the year/month it
+// lands in, so integer indices map to exact civil dates. Returns "" unless the
+// unit's period is years or months.
+std::string Units::format_time_year_month(const std::string &spec,
+                                          double value) const {
+    std::string lo = spec;
+    std::transform(lo.begin(), lo.end(), lo.begin(), ::tolower);
+    size_t sp = lo.find("since");
+    if (sp == std::string::npos) return {};
+
+    std::string period = lo.substr(0, sp);
+    size_t a = period.find_first_not_of(" \t");
+    size_t b = period.find_last_not_of(" \t");
+    if (a == std::string::npos) return {};
+    period = period.substr(a, b - a + 1);
+
+    const bool is_year = period.rfind("year", 0) == 0 || period == "yr" ||
+                         period == "yrs" || period == "y";
+    const bool is_month = period.rfind("month", 0) == 0 || period == "mon" ||
+                          period == "mons";
+    if (!is_year && !is_month) return {};
+
+    std::string ref = spec.substr(sp + 5);
+    int y0, mo0, d0, h0 = 0, mi0 = 0; double s0 = 0.0;
+    int n = std::sscanf(ref.c_str(), " %d-%d-%d %d:%d:%lf",
+                        &y0, &mo0, &d0, &h0, &mi0, &s0);
+    if (n < 3)
+        n = std::sscanf(ref.c_str(), " %d-%d-%dT%d:%d:%lf",
+                        &y0, &mo0, &d0, &h0, &mi0, &s0);
+    if (n < 3) return {};
+
+    int ny, nm; double frac;
+    if (is_year) {
+        long whole = (long)std::floor(value);
+        frac = value - (double)whole;
+        ny = y0 + (int)whole; nm = mo0;
+    } else {
+        long whole = (long)std::floor(value);
+        frac = value - (double)whole;
+        long tot = (long)(mo0 - 1) + whole;             // months from year 0's Jan
+        long yy = tot / 12, mm = tot % 12;
+        if (mm < 0) { mm += 12; yy -= 1; }
+        ny = y0 + (int)yy; nm = (int)mm + 1;
+    }
+
+    double period_days = is_year ? days_in_year(ny) : days_in_month(ny, nm);
+    double total_sec = (double)days_from_civil(ny, (unsigned)nm, (unsigned)d0) * 86400.0
+                       + h0 * 3600.0 + mi0 * 60.0 + s0
+                       + frac * period_days * 86400.0;
+
+    long day = (long)std::floor(total_sec / 86400.0);
+    double rem = total_sec - (double)day * 86400.0;
+    int hh = (int)(rem / 3600.0); rem -= hh * 3600.0;
+    int mm = (int)(rem / 60.0); rem -= mm * 60.0;
+
+    int Y; unsigned Mo, D;
+    civil_from_days(day, Y, Mo, D);
+    return fmt_date(Y, (int)Mo, (int)D, hh, mm, rem);
 }
 
 // ---- Manual arithmetic for non-standard CF calendars -----------------------

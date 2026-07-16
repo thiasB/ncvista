@@ -32,4 +32,9 @@ private:
     std::string format_time_calendar(const std::string &spec,
                                       const std::string &calendar,
                                       double value) const;
+
+    // "years since"/"months since" on standard calendars, advancing whole
+    // calendar years/months (udunits would use a fixed-length year that drifts
+    // from the civil calendar). Returns "" if `spec` is not a years/months unit.
+    std::string format_time_year_month(const std::string &spec, double value) const;
 };
