@@ -368,49 +368,89 @@ bool NcFile::var_minmax(const NcVar &v, double &lo, double &hi) const {
     if (!v.numeric || v.ndims < 1) return false;
 
     std::vector<size_t> len(v.ndims);
+    size_t total = 1;
     for (int i = 0; i < v.ndims; ++i) {
         len[i] = dim(v.dimids[i]).len;
         if (len[i] == 0) return false;
+        total *= len[i];
     }
 
-    // Sub-sample with a uniform per-dimension stride so the read stays cheap
-    // even for very large variables (cap on the number of sampled points).
+    // Points budget for the scan. Reads are always contiguous hyperslabs in
+    // storage order — whole slabs along the outermost dimension — never
+    // strided: a strided read over a chunked/compressed variable touches (and
+    // decompresses) every chunk of the whole variable, which made this scan
+    // far slower than reading a few complete frames (what ncview does).
     const size_t CAP = 4'000'000;
-    auto sampled = [&](size_t s) {
-        size_t c = 1;
-        for (int i = 0; i < v.ndims; ++i) c *= (len[i] + s - 1) / s;
-        return c;
-    };
-    size_t stride = 1;
-    while (sampled(stride) > CAP) ++stride;
-
-    std::vector<size_t> start(v.ndims, 0), count(v.ndims);
-    std::vector<ptrdiff_t> strd(v.ndims, (ptrdiff_t)stride);
-    size_t n = 1;
-    for (int i = 0; i < v.ndims; ++i) {
-        count[i] = (len[i] + stride - 1) / stride;
-        n *= count[i];
-    }
-
-    std::vector<double> buf(n);
-    int rc = (stride == 1)
-                 ? nc_get_var_double(ncid_, v.id, buf.data())
-                 : nc_get_vars_double(ncid_, v.id, start.data(), count.data(),
-                                      strd.data(), buf.data());
-    if (rc != NC_NOERR) return false;
 
     double mn = std::numeric_limits<double>::infinity();
     double mx = -std::numeric_limits<double>::infinity();
-    for (double val : buf) {
-        if (!std::isfinite(val)) continue;
-        if (v.has_fill &&
-            (val == v.fill || std::fabs(val - v.fill) <= 1e-6 * std::fabs(v.fill)))
-            continue;
-        if (std::fabs(val) >= 9.0e36) continue;
-        if (v.packed) val = val * v.scale + v.offset;   // unpack to physical units
-        if (val < mn) mn = val;
-        if (val > mx) mx = val;
+    auto reduce = [&](const double *p, size_t cnt) {
+        for (size_t i = 0; i < cnt; ++i) {
+            double val = p[i];
+            if (!std::isfinite(val)) continue;
+            if (v.has_fill &&
+                (val == v.fill || std::fabs(val - v.fill) <= 1e-6 * std::fabs(v.fill)))
+                continue;
+            if (std::fabs(val) >= 9.0e36) continue;
+            if (v.packed) val = val * v.scale + v.offset;  // unpack to physical
+            if (val < mn) mn = val;
+            if (val > mx) mx = val;
+        }
+    };
+
+    std::vector<double> buf;
+    std::vector<size_t> start(v.ndims, 0), count(len.begin(), len.end());
+    const size_t slab = total / len[0];   // one outer index (e.g. one time step)
+
+    if (total <= CAP) {
+        // Small enough: read everything in one call (exact range).
+        buf.resize(total);
+        if (nc_get_var_double(ncid_, v.id, buf.data()) != NC_NOERR) return false;
+        reduce(buf.data(), total);
+    } else if (v.ndims == 1) {
+        // Huge 1-D variable: stream it in contiguous blocks (exact range).
+        buf.resize(CAP);
+        for (size_t off = 0; off < len[0]; off += CAP) {
+            start[0] = off;
+            count[0] = std::min(CAP, len[0] - off);
+            if (nc_get_vara_double(ncid_, v.id, start.data(), count.data(),
+                                   buf.data()) != NC_NOERR)
+                return false;
+            reduce(buf.data(), count[0]);
+        }
+    } else if (slab <= CAP) {
+        // Sample K complete outer slabs, evenly spaced with the first and last
+        // included, so the whole span of e.g. a time axis contributes.
+        size_t K = std::max<size_t>(1, std::min(len[0], CAP / slab));
+        buf.resize(slab);
+        count[0] = 1;
+        for (size_t k = 0; k < K; ++k) {
+            start[0] = (K == 1) ? len[0] / 2
+                                : (size_t)std::llround(
+                                      (double)k * (double)(len[0] - 1) / (K - 1));
+            if (nc_get_vara_double(ncid_, v.id, start.data(), count.data(),
+                                   buf.data()) != NC_NOERR)
+                return false;
+            reduce(buf.data(), slab);
+        }
+    } else {
+        // Even a single outer slab exceeds the budget (very high-resolution
+        // field): scan the middle slab, streamed in row blocks along the next
+        // dimension to bound memory.
+        start[0] = len[0] / 2; count[0] = 1;
+        const size_t inner = slab / len[1];         // product of dims 2..n
+        const size_t rows_per_block = std::max<size_t>(1, CAP / inner);
+        buf.resize(rows_per_block * inner);
+        for (size_t r = 0; r < len[1]; r += rows_per_block) {
+            start[1] = r;
+            count[1] = std::min(rows_per_block, len[1] - r);
+            if (nc_get_vara_double(ncid_, v.id, start.data(), count.data(),
+                                   buf.data()) != NC_NOERR)
+                return false;
+            reduce(buf.data(), count[1] * inner);
+        }
     }
+
     if (mn > mx) return false;
     lo = mn; hi = mx;
     return true;
