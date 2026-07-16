@@ -1219,10 +1219,15 @@ void App::draw_plot() {
     }
 
     // Paint from the server-side mirror: pixels are uploaded only when the
-    // raster was rebuilt above, never per redraw (see server_mirror).
+    // raster was rebuilt above, never per redraw (see server_mirror). The
+    // scaled copy is display-sized, so always mirror it; the native image is
+    // mirrored only when modest (a huge zoomed-in grid would pin an equally
+    // huge pixmap on the server — paint it directly instead, as before).
     const bool from_scaled = (src == data_scaled_);
-    cairo_surface_t *fsrv =
-        server_mirror(src, field_mir_, from_scaled ? ds_ver_ * 2 + 1 : img_gen_ * 2);
+    cairo_surface_t *fsrv = src;
+    if (from_scaled || (size_t)nx * ny <= 4'000'000)
+        fsrv = server_mirror(src, field_mir_,
+                             from_scaled ? ds_ver_ * 2 + 1 : img_gen_ * 2);
 
     cairo_save(cr_);
     // Clip to the visible image rect so the zoomed crop shows only that region.
