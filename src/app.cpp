@@ -180,8 +180,23 @@ private:
     // grid) to the X server slashes per-frame bandwidth on remote (SSH) displays.
     cairo_surface_t *data_scaled_ = nullptr;
     long ds_gen_ = -1;                  // img_gen_ the scaled copy was built from
+    long ds_ver_ = 0;                   // bumped whenever data_scaled_ is rebuilt
     int ds_iw_ = 0, ds_ih_ = 0;        // scaled-surface size (device pixels)
     double ds_vx0_ = 0, ds_vy0_ = 0, ds_vw_ = 0, ds_vh_ = 0;  // source crop it covers
+
+    // Server-side (pixmap) mirror of a client-side raster. Painting a cairo
+    // image surface onto an Xlib target re-uploads the pixels on every paint;
+    // painting from a "similar" (pixmap) surface is a server-side copy. Each
+    // cached raster therefore gets a mirror that is refreshed — one upload —
+    // only when the raster is rebuilt (`ver` changes), so per-frame redraws
+    // send no pixel data at all. This is what keeps redraws cheap over SSH.
+    struct SrvMirror {
+        cairo_surface_t *srv = nullptr;
+        long ver = -1;
+        int w = 0, h = 0;
+    };
+    SrvMirror field_mir_, proj_mir_;
+    cairo_surface_t *server_mirror(cairo_surface_t *img, SrvMirror &m, long ver);
 
     std::vector<double> ycoord_, xcoord_;
     Coastlines coast_, borders_;
@@ -195,6 +210,7 @@ private:
     cairo_surface_t *proj_img_ = nullptr;
     int proj_pj_ = -1, proj_cmap_ = -1, proj_w_ = -1, proj_h_ = -1;
     long proj_ver_ = -1;
+    long proj_gen_ = 0;                 // bumped whenever proj_img_ is rebuilt
     double proj_vmin_ = 0, proj_vmax_ = 0;
     bool proj_rev_ = false;
     bool projected() const { return geographic_ && proj_idx_ != proj::EQUIRECT; }
@@ -208,6 +224,8 @@ private:
     // geometry changes — never on hover, animation or recolour.
     struct LineOverlay {
         cairo_surface_t *img = nullptr;
+        long ver = 0;                   // bumped per rebuild (drives mir)
+        SrvMirror mir;                  // server-side copy painted each frame
         double s = -1, vx0 = -1, vy0 = -1, vw = -1, vh = -1;
         int nx = -1, ny = -1, var = -1;
         bool flip = false;
@@ -219,6 +237,15 @@ private:
     int anim_dim_ = -1;                // dim position used for animation
 
     double mouse_x_ = -1, mouse_y_ = -1;
+
+    // Signature of every mouse-position-dependent visual at the last motion
+    // redraw. A pointer move that leaves it unchanged (dead areas: margins,
+    // colour bar, plot background outside the image, …) skips the redraw
+    // entirely — no X traffic at all, which matters over SSH-tunneled displays.
+    uint64_t motion_sig_ = 0;
+    double title_x0_ = 0, title_w_ = 0;   // toolbar file-title hover region
+    bool motion_needs_render();
+    const Rect *button_tip_hit(const char **desc) const;
 
     // ---- X / cairo -------------------------------------------------------
     Display *dpy_ = nullptr;
@@ -681,6 +708,26 @@ void App::make_back_buffer() {
     cr_ = cairo_create(back_);
 }
 
+// Refresh (if needed) and return the server-side pixmap copy of `img`. The
+// pixel upload happens only when `ver` or the size changed; every other frame
+// paints from the pixmap, which is a pure server-side operation.
+cairo_surface_t *App::server_mirror(cairo_surface_t *img, SrvMirror &m, long ver) {
+    if (!back_) return img;
+    int w = cairo_image_surface_get_width(img);
+    int h = cairo_image_surface_get_height(img);
+    if (!m.srv || m.ver != ver || m.w != w || m.h != h) {
+        if (m.srv) cairo_surface_destroy(m.srv);
+        m.srv = cairo_surface_create_similar(back_, CAIRO_CONTENT_COLOR_ALPHA, w, h);
+        cairo_t *c = cairo_create(m.srv);
+        cairo_set_operator(c, CAIRO_OPERATOR_SOURCE);
+        cairo_set_source_surface(c, img, 0, 0);
+        cairo_paint(c);
+        cairo_destroy(c);
+        m.ver = ver; m.w = w; m.h = h;
+    }
+    return m.srv;
+}
+
 void App::render() {
     if (!back_ || !cr_) return;
     layout();
@@ -761,6 +808,7 @@ void App::draw_toolbar() {
     // path) on hover as a tooltip.
     bool truncated = tw > avail;
     double regionw = std::min(tw, avail);
+    title_x0_ = x0; title_w_ = truncated ? regionw : 0;  // for motion gating
     if (truncated && mouse_x_ >= x0 && mouse_x_ <= x0 + regionw &&
         mouse_y_ >= 0 && mouse_y_ <= r_toolbar_.h) {
         double fw, fh;
@@ -875,8 +923,9 @@ void App::draw_var_tooltip() {
         draw_text(cr_, l2, bx + padx, by + pady + h1 + gap, COL_TEXT_DIM, 11, false);
 }
 
-// Hovering a toolbar or playback button shows a short description of its action.
-void App::draw_button_tooltip() {
+// The button under the pointer (with its tooltip text), or nullptr. Shared by
+// the tooltip renderer and by the motion-redraw gating.
+const Rect *App::button_tip_hit(const char **desc) const {
     struct BT { const Rect *r; const char *desc; };
     const BT items[] = {
         {&r_first_, "Jump to first frame"},
@@ -893,11 +942,19 @@ void App::draw_button_tooltip() {
         {&r_proj_,  "Choose map projection (geographic data)"},
         {&r_info_,  "Open the metadata window"},
     };
-    const Rect *br = nullptr;
-    const char *desc = nullptr;
     for (const auto &it : items)
-        if (it.r->hit(mouse_x_, mouse_y_)) { br = it.r; desc = it.desc; break; }
-    if (!desc) return;
+        if (it.r->hit(mouse_x_, mouse_y_)) {
+            if (desc) *desc = it.desc;
+            return it.r;
+        }
+    return nullptr;
+}
+
+// Hovering a toolbar or playback button shows a short description of its action.
+void App::draw_button_tooltip() {
+    const char *desc = nullptr;
+    const Rect *br = button_tip_hit(&desc);
+    if (!br || !desc) return;
     if (br == &r_cmap_ && cmap_open_) return;   // dropdown shows the options instead
     if (br == &r_proj_ && proj_open_) return;
 
@@ -1155,10 +1212,17 @@ void App::draw_plot() {
             cairo_surface_flush(data_scaled_);
             ds_gen_ = img_gen_; ds_iw_ = iw; ds_ih_ = ih;
             ds_vx0_ = vx0; ds_vy0_ = vy0; ds_vw_ = vw; ds_vh_ = vh;
+            ++ds_ver_;
         }
         src = data_scaled_;
         sx = dw / iw; sy = dh / ih; tx = 0; ty = 0;
     }
+
+    // Paint from the server-side mirror: pixels are uploaded only when the
+    // raster was rebuilt above, never per redraw (see server_mirror).
+    const bool from_scaled = (src == data_scaled_);
+    cairo_surface_t *fsrv =
+        server_mirror(src, field_mir_, from_scaled ? ds_ver_ * 2 + 1 : img_gen_ * 2);
 
     cairo_save(cr_);
     // Clip to the visible image rect so the zoomed crop shows only that region.
@@ -1167,7 +1231,7 @@ void App::draw_plot() {
     cairo_translate(cr_, ox, oy);
     cairo_scale(cr_, sx, sy);
     cairo_translate(cr_, tx, ty);
-    cairo_set_source_surface(cr_, src, 0, 0);
+    cairo_set_source_surface(cr_, fsrv, 0, 0);
     cairo_pattern_set_filter(cairo_get_source(cr_), CAIRO_FILTER_NEAREST);
     cairo_paint(cr_);
     cairo_restore(cr_);
@@ -1348,9 +1412,10 @@ void App::draw_overlay(const Coastlines &src, LineOverlay &ov, const RGB &core,
         ov.s = s; ov.nx = nx; ov.ny = ny;
         ov.flip = flip_y_; ov.var = cur_var_;
         ov.vx0 = vx0; ov.vy0 = vy0; ov.vw = vw; ov.vh = vh;
+        ++ov.ver;
     }
 
-    cairo_set_source_surface(cr_, ov.img, ox, oy);
+    cairo_set_source_surface(cr_, server_mirror(ov.img, ov.mir, ov.ver), ox, oy);
     cairo_paint(cr_);
 }
 
@@ -1418,9 +1483,11 @@ void App::draw_projected() {
         proj_pj_ = proj_idx_; proj_cmap_ = cmap_idx_; proj_ver_ = slice_version_;
         proj_vmin_ = vmin_; proj_vmax_ = vmax_; proj_rev_ = reversed_;
         proj_w_ = iw; proj_h_ = ih;
+        ++proj_gen_;
     }
 
-    cairo_set_source_surface(cr_, proj_img_, ox, oy);
+    cairo_set_source_surface(cr_, server_mirror(proj_img_, proj_mir_, proj_gen_),
+                             ox, oy);
     cairo_pattern_set_filter(cairo_get_source(cr_), CAIRO_FILTER_NEAREST);
     cairo_paint(cr_);
 
@@ -1804,6 +1871,60 @@ void App::plot_scroll_to(double mx, double my, int axis) {
         double f = std::clamp((mx - plot_ox_) / plot_dw_ - w / 2, 0.0, 1.0 - w);
         zoom_fx0_ = f; zoom_fx1_ = f + w;
     }
+}
+
+// Decide whether the last pointer move requires a redraw: only when some
+// mouse-dependent visual (in-plot crosshair/readout, a tooltip, a menu-row
+// highlight) would look different. Motion over dead areas is then free.
+bool App::motion_needs_render() {
+    // Drags and the rubber-band selection track the pointer continuously.
+    if (selecting_ || drag_sidebar_ || plot_sb_drag_ || drag_slider_ >= 0)
+        return true;
+
+    uint64_t sig = 0xcbf29ce484222325ull;                    // FNV-1a
+    auto mix = [&sig](uint64_t v) { sig = (sig ^ v) * 0x100000001b3ull; };
+
+    // Crosshair + cell readout follow the pointer pixel-exactly inside the
+    // field image (equirectangular mode only; plot_s_ is 0 when projected).
+    if (plot_s_ > 0 && mouse_x_ >= plot_ox_ && mouse_x_ <= plot_ox_ + plot_dw_ &&
+        mouse_y_ >= plot_oy_ && mouse_y_ <= plot_oy_ + plot_dh_) {
+        mix(1); mix((uint64_t)(int64_t)mouse_x_); mix((uint64_t)(int64_t)mouse_y_);
+    }
+
+    // Sidebar variable hover: the tooltip follows the pointer while over an item.
+    if (r_sidebar_.hit(mouse_x_, mouse_y_)) {
+        int hit = -1;
+        for (size_t i = 0; i < r_varitems_.size(); ++i)
+            if (r_varitems_[i].hit(mouse_x_, mouse_y_)) { hit = (int)i; break; }
+        mix(2); mix((uint64_t)(int64_t)hit);
+        if (hit >= 0) { mix((uint64_t)(int64_t)mouse_x_); mix((uint64_t)(int64_t)mouse_y_); }
+    }
+
+    // Button tooltips are anchored to the button, so its identity suffices.
+    mix((uint64_t)(uintptr_t)button_tip_hit(nullptr));
+
+    // Toolbar file-title tooltip (fixed position): a boolean.
+    mix(title_w_ > 0 && mouse_x_ >= title_x0_ && mouse_x_ <= title_x0_ + title_w_ &&
+                mouse_y_ >= 0 && mouse_y_ <= r_toolbar_.h
+            ? 3u : 4u);
+
+    // Open dropdown menus highlight the hovered row.
+    if (cmap_open_) {
+        int hit = -1;
+        for (size_t i = 0; i < r_cmap_items_.size(); ++i)
+            if (r_cmap_items_[i].hit(mouse_x_, mouse_y_)) { hit = (int)i; break; }
+        mix(5); mix((uint64_t)(int64_t)hit);
+    }
+    if (proj_open_) {
+        int hit = -1;
+        for (size_t i = 0; i < r_proj_items_.size(); ++i)
+            if (r_proj_items_[i].hit(mouse_x_, mouse_y_)) { hit = (int)i; break; }
+        mix(6); mix((uint64_t)(int64_t)hit);
+    }
+
+    if (sig == motion_sig_) return false;
+    motion_sig_ = sig;
+    return true;
 }
 
 void App::on_motion(int mx, int my) {
@@ -2754,7 +2875,9 @@ int App::run() {
                     while (XCheckTypedWindowEvent(dpy_, win_, MotionNotify, &latest))
                         ;
                     on_motion(latest.xmotion.x, latest.xmotion.y);
-                    render();
+                    // Redraw only when a mouse-dependent visual changed; idle
+                    // motion over dead areas generates no drawing traffic.
+                    if (motion_needs_render()) render();
                     break;
                 }
                 case KeyPress: {
@@ -2804,6 +2927,10 @@ int App::run() {
     if (proj_img_) cairo_surface_destroy(proj_img_);
     if (coast_ov_.img) cairo_surface_destroy(coast_ov_.img);
     if (borders_ov_.img) cairo_surface_destroy(borders_ov_.img);
+    if (field_mir_.srv) cairo_surface_destroy(field_mir_.srv);
+    if (proj_mir_.srv) cairo_surface_destroy(proj_mir_.srv);
+    if (coast_ov_.mir.srv) cairo_surface_destroy(coast_ov_.mir.srv);
+    if (borders_ov_.mir.srv) cairo_surface_destroy(borders_ov_.mir.srv);
     cairo_destroy(cr_);
     cairo_surface_destroy(back_);
     cairo_destroy(front_cr_);
