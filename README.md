@@ -64,9 +64,11 @@ coastline overlay](docs/screenshot.png)
 - **Time-series window**: click a grid cell in the plot to open a line chart of
   that cell's series along the time axis, at the currently selected vertical
   level (and other fixed dimensions). The x-axis uses udunits calendar dates, the
-  current frame is highlighted, and the unit is shown in the title. For large
-  (high-resolution / vertically resolved) variables the extraction can be slow, so
-  a "please wait" popup is shown while it runs.
+  current frame is highlighted, and the unit is shown in the title. Drag
+  horizontally over the chart to zoom into that time span (axis ticks and the
+  hover readout follow the selection); right-click restores the full range. For
+  large (high-resolution / vertically resolved) variables the extraction can be
+  slow, so a "please wait" popup is shown while it runs.
 - **Metadata window**: a second, scrollable window listing the file's
   dimensions, global attributes, and every variable with its full attribute set
   (an ncdump-style header), colour-coded and monospaced. The text is selectable
@@ -111,6 +113,8 @@ coastline overlay](docs/screenshot.png)
 | Move a dimension  | drag the slider                          |
 | Inspect a cell    | hover the plot                           |
 | Cell time series  | click a cell in the plot                 |
+| Zoom a time span  | drag horizontally in the time-series chart |
+| Reset time zoom   | right-click the time-series chart        |
 | Zoom into region  | drag a rectangle over the plot           |
 | Pan (when zoomed) | wheel / Shift+wheel, or drag the plot scrollbars |
 | Reset zoom        | right-click the plot                     |

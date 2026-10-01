@@ -298,11 +298,18 @@ private:
     int ts_cur_idx_ = -1;                // index to highlight (current frame)
     int ts_hover_idx_ = -1;              // sample under the mouse pointer (-1 = none)
     double ts_ymin_ = 0, ts_ymax_ = 1;
+    double ts_v0_ = 0, ts_v1_ = 1;       // x-axis view window as an index-fraction
+                                         // range; a horizontal drag zooms into the
+                                         // selected time span, right-click resets
+    bool ts_selecting_ = false;          // rubber-band span selection in progress
+    int ts_sel_x0_ = 0, ts_sel_x1_ = 0;  // its pixel ends inside the plot area
 
     // Plot-area geometry of a rendered line chart, recorded by draw_series()
     // into a caller-owned copy: the time-series window's hover hit-testing
     // must not be clobbered by the main window drawing its 1-D line plot.
-    struct SeriesGeom { double px0 = 0, py0 = 0, pw = 0, ph = 0; int n = 0; };
+    // [v0, v1] is the index-fraction range of the samples the map displays.
+    struct SeriesGeom { double px0 = 0, py0 = 0, pw = 0, ph = 0; int n = 0;
+                        double v0 = 0, v1 = 1; };
     SeriesGeom ts_geom_;                  // chart inside the ts cache
 
     // Cached static chart. The chart (axes, series, current-frame marker) only
@@ -318,15 +325,19 @@ private:
     void draw_ts();
     void build_ts_cache();             // (re)render the static chart into ts_cache_
     void draw_ts_hover();              // overlay cursor line + bubble for ts_hover_idx_
+    void draw_ts_selection();          // rubber-band overlay during a span drag
+    int ts_sample_at_x(int mx) const;  // nearest global sample under a pixel
 
     // Reusable line-chart renderer (used by the time-series window and by the
-    // main plot when the current variable is 1-D). g receives the plot-area
-    // geometry for later hit-testing; each caller owns its copy.
+    // main plot when the current variable is 1-D). [v0, v1] is the
+    // index-fraction range of the samples to display (a full-range view is
+    // 0..1). g receives the plot-area geometry for later hit-testing; each
+    // caller owns its copy.
     void draw_series(cairo_t *cr, const Rect &R,
                      const std::vector<double> &xv, const std::vector<double> &yv,
                      double ymin, double ymax, bool is_time,
                      const std::string &xunits, const std::string &xcal, int cur_idx,
-                     SeriesGeom &g);
+                     double v0, double v1, SeriesGeom &g);
 
     // ---- 1-D variable shown as a line plot in the main window ------------
     std::vector<double> line_vals_, line_x_;
@@ -2408,7 +2419,8 @@ void App::open_ts_window(size_t yidx, size_t xidx) {
         XSetWindowAttributes attrs;
         attrs.background_pixel = BlackPixel(dpy_, screen);
         attrs.event_mask = ExposureMask | KeyPressMask | ButtonPressMask |
-                           PointerMotionMask | LeaveWindowMask | StructureNotifyMask;
+                           ButtonReleaseMask | PointerMotionMask |
+                           LeaveWindowMask | StructureNotifyMask;
         ts_win_ = XCreateWindow(dpy_, RootWindow(dpy_, screen), 0, 0, ts_w_, ts_h_,
                                 0, DefaultDepth(dpy_, screen), InputOutput,
                                 DefaultVisual(dpy_, screen),
@@ -2428,6 +2440,8 @@ void App::open_ts_window(size_t yidx, size_t xidx) {
         XRaiseWindow(dpy_, ts_win_);
     }
     ts_hover_idx_ = -1;
+    ts_v0_ = 0; ts_v1_ = 1;   // a (re)opened series starts at the full range
+    ts_selecting_ = false;
     ts_cache_dirty_ = true;   // new series / location: rebuild the cached chart
     draw_ts();
 }
@@ -2463,7 +2477,7 @@ void App::build_ts_cache() {
 
     Rect R{0, 46, (double)ts_w_, (double)ts_h_ - 46};
     draw_series(cr, R, ts_x_, ts_vals_, ts_ymin_, ts_ymax_, ts_is_time_,
-                ts_xunits_, ts_xcal_, ts_cur_idx_, ts_geom_);
+                ts_xunits_, ts_xcal_, ts_cur_idx_, ts_v0_, ts_v1_, ts_geom_);
     cairo_destroy(cr);
     ts_cache_dirty_ = false;
 }
@@ -2480,6 +2494,7 @@ void App::draw_ts() {
     cairo_paint(ts_cr_);
     cairo_set_operator(ts_cr_, CAIRO_OPERATOR_OVER);
     if (ts_hover_idx_ >= 0) draw_ts_hover();
+    if (ts_selecting_) draw_ts_selection();
 
     cairo_surface_flush(ts_surf_);
     XFlush(dpy_);
@@ -2492,9 +2507,13 @@ void App::draw_ts_hover() {
     cairo_t *cr = ts_cr_;
     int n = ts_geom_.n, idx = ts_hover_idx_;
     if (idx < 0 || idx >= n || ts_geom_.pw <= 0 || ts_ymax_ <= ts_ymin_) return;
+    double t = (n > 1) ? (double)idx / (n - 1) : 0.5;
+    if (t < ts_geom_.v0 - 1e-9 || t > ts_geom_.v1 + 1e-9) return;  // zoomed away
 
     auto xmap = [&](int i) {
-        return ts_geom_.px0 + (n > 1 ? (double)i / (n - 1) : 0.5) * ts_geom_.pw;
+        double t = (n > 1) ? (double)i / (n - 1) : 0.5;
+        return ts_geom_.px0 +
+               (t - ts_geom_.v0) / (ts_geom_.v1 - ts_geom_.v0) * ts_geom_.pw;
     };
     auto ymap = [&](double v) {
         return ts_geom_.py0 + ts_geom_.ph - (v - ts_ymin_) / (ts_ymax_ - ts_ymin_) * ts_geom_.ph;
@@ -2545,22 +2564,58 @@ void App::draw_ts_hover() {
     draw_text(cr, yl, bx + pad, by + pad + h1 + 2, COL_TEXT, 12, true);
 }
 
+// Overlay the translucent band of an in-progress span selection.
+void App::draw_ts_selection() {
+    if (ts_geom_.pw <= 0 || ts_geom_.ph <= 0) return;
+    double a = std::clamp((double)std::min(ts_sel_x0_, ts_sel_x1_),
+                          ts_geom_.px0, ts_geom_.px0 + ts_geom_.pw);
+    double b = std::clamp((double)std::max(ts_sel_x0_, ts_sel_x1_),
+                          ts_geom_.px0, ts_geom_.px0 + ts_geom_.pw);
+    cairo_t *cr = ts_cr_;
+    set_color(cr, COL_ACCENT, 0.18);
+    cairo_rectangle(cr, a, ts_geom_.py0, b - a, ts_geom_.ph);
+    cairo_fill(cr);
+    set_color(cr, COL_ACCENT, 0.8);
+    cairo_set_line_width(cr, 1);
+    cairo_move_to(cr, a + 0.5, ts_geom_.py0);
+    cairo_line_to(cr, a + 0.5, ts_geom_.py0 + ts_geom_.ph);
+    cairo_move_to(cr, b - 0.5, ts_geom_.py0);
+    cairo_line_to(cr, b - 0.5, ts_geom_.py0 + ts_geom_.ph);
+    cairo_stroke(cr);
+}
+
+// The nearest sample (global index) under a window x pixel, honouring the
+// current zoom window. -1 when no chart is drawn yet.
+int App::ts_sample_at_x(int mx) const {
+    if (ts_geom_.n <= 0 || ts_geom_.pw <= 0) return -1;
+    double f = std::clamp((double)(mx - ts_geom_.px0) / ts_geom_.pw, 0.0, 1.0);
+    double t = ts_geom_.v0 + f * (ts_geom_.v1 - ts_geom_.v0);
+    int idx = (ts_geom_.n > 1) ? (int)std::lround(t * (ts_geom_.n - 1)) : 0;
+    return std::clamp(idx, 0, ts_geom_.n - 1);
+}
+
 // Draw a line chart of (xv, yv) within rectangle R. cur_idx (>= 0) highlights a
-// sample (the current animation frame); pass -1 for none. g records the plot-area
-// geometry for the caller's later hover hit-testing.
+// sample (the current animation frame); pass -1 for none. [v0, v1] is the
+// index-fraction range to display; g records the plot-area geometry (incl. the
+// window) for the caller's later hover hit-testing.
 void App::draw_series(cairo_t *cr, const Rect &R,
                       const std::vector<double> &xv, const std::vector<double> &yv,
                       double ymin, double ymax, bool is_time,
                       const std::string &xunits, const std::string &xcal, int cur_idx,
-                      SeriesGeom &g) {
+                      double v0, double v1, SeriesGeom &g) {
     const double ml = 64, mr = 16, mt = 10, mb = 34;
     double px0 = R.x + ml, py0 = R.y + mt, pw = R.w - ml - mr, ph = R.h - mt - mb;
     if (pw < 20 || ph < 20) return;
     if (ymax <= ymin) ymax = ymin + 1;
+    // Degenerate, inverted or out-of-bounds windows simply mean "show all".
+    if (!(v0 >= 0) || !(v1 <= 1) || v1 < v0 + 1e-9) { v0 = 0; v1 = 1; }
 
     int n = (int)yv.size();
-    g = SeriesGeom{px0, py0, pw, ph, n};
-    auto xmap = [&](int i) { return px0 + (n > 1 ? (double)i / (n - 1) : 0.5) * pw; };
+    g = SeriesGeom{px0, py0, pw, ph, n, v0, v1};
+    auto xmap = [&](int i) {
+        double t = (n > 1) ? (double)i / (n - 1) : 0.5;
+        return px0 + (t - v0) / (v1 - v0) * pw;
+    };
     auto ymap = [&](double val) { return py0 + ph - (val - ymin) / (ymax - ymin) * ph; };
 
     // Plot frame.
@@ -2582,10 +2637,17 @@ void App::draw_series(cairo_t *cr, const Rect &R,
         draw_text(cr, fmt_num(val), px0 - tw - 6, y - th / 2, COL_TEXT_DIM, 11);
     }
 
-    // X ticks + labels.
-    const int nxt = (n >= 6) ? 6 : std::max(2, n);
+    // X ticks + labels, spread over the samples visible in the window.
+    int i_lo = 0, i_hi = n > 0 ? n - 1 : 0;
+    if (n > 1) {
+        i_lo = std::clamp((int)std::ceil(v0 * (n - 1)), 0, n - 1);
+        i_hi = std::clamp((int)std::floor(v1 * (n - 1)), i_lo, n - 1);
+    }
+    const int nvis = i_hi - i_lo + 1;
+    const int nxt = (nvis >= 6) ? 6 : std::max(2, nvis);
     for (int i = 0; i < nxt; ++i) {
-        int idx = (nxt == 1) ? 0 : (int)std::lround((double)i / (nxt - 1) * (n - 1));
+        int idx = (nxt == 1) ? i_lo
+                             : i_lo + (int)std::lround((double)i / (nxt - 1) * (i_hi - i_lo));
         double x = xmap(idx);
         set_color(cr, COL_BORDER, 0.4);
         cairo_move_to(cr, x, py0); cairo_line_to(cr, x, py0 + ph);
@@ -2602,13 +2664,16 @@ void App::draw_series(cairo_t *cr, const Rect &R,
         draw_text(cr, lbl, tx, py0 + ph + 6, COL_TEXT_DIM, 10);
     }
 
-    // Highlight a current sample.
+    // Highlight a current sample, when it lies inside the window.
     if (cur_idx >= 0 && cur_idx < n) {
-        double x = xmap(cur_idx);
-        set_color(cr, COL_ACCENT, 0.5);
-        cairo_set_line_width(cr, 1.5);
-        cairo_move_to(cr, x, py0); cairo_line_to(cr, x, py0 + ph);
-        cairo_stroke(cr);
+        double t = (n > 1) ? (double)cur_idx / (n - 1) : 0.5;
+        if (t >= v0 && t <= v1) {
+            double x = xmap(cur_idx);
+            set_color(cr, COL_ACCENT, 0.5);
+            cairo_set_line_width(cr, 1.5);
+            cairo_move_to(cr, x, py0); cairo_line_to(cr, x, py0 + ph);
+            cairo_stroke(cr);
+        }
     }
 
     // Axis border.
@@ -2616,6 +2681,12 @@ void App::draw_series(cairo_t *cr, const Rect &R,
     cairo_set_line_width(cr, 1);
     cairo_rectangle(cr, px0, py0, pw, ph);
     cairo_stroke(cr);
+
+    // Series + markers, clipped to the plot area so the zoomed view never
+    // bleeds over the frame and axis labels.
+    cairo_save(cr);
+    cairo_rectangle(cr, px0, py0, pw, ph);
+    cairo_clip(cr);
 
     // The series line (break across missing values).
     set_color(cr, COL_ACCENT);
@@ -2630,9 +2701,9 @@ void App::draw_series(cairo_t *cr, const Rect &R,
     }
     cairo_stroke(cr);
 
-    // Point markers when the series is short enough to be legible.
-    if (n <= 80) {
-        for (int i = 0; i < n; ++i) {
+    // Point markers when the visible count is small enough to be legible.
+    if (n > 0 && nvis <= 80) {
+        for (int i = i_lo; i <= i_hi; ++i) {
             if (std::isnan(yv[i])) continue;
             double x = xmap(i), y = ymap(yv[i]);
             set_color(cr, i == cur_idx ? RGB{1, 1, 1} : COL_ACCENT);
@@ -2640,6 +2711,7 @@ void App::draw_series(cairo_t *cr, const Rect &R,
             cairo_fill(cr);
         }
     }
+    cairo_restore(cr);
 }
 
 // The main-window line plot for a 1-D variable.
@@ -2647,7 +2719,7 @@ void App::draw_plot_line() {
     SeriesGeom lg;    // nothing hit-tests the main-window line plot; keep its
                       // geometry out of an open time-series window's copy
     draw_series(cr_, r_plot_, line_x_, line_vals_, line_ymin_, line_ymax_,
-                line_is_time_, line_xunits_, line_xcal_, -1, lg);
+                line_is_time_, line_xunits_, line_xcal_, -1, 0.0, 1.0, lg);
 }
 
 // ---- main loop -------------------------------------------------------------
@@ -2816,6 +2888,55 @@ int App::run() {
                         }
                         draw_ts();
                         break;
+                    case ButtonPress:
+                        if (ev.xbutton.button == Button1 && ts_geom_.n > 1 &&
+                            ts_geom_.pw > 0 &&
+                            ev.xbutton.x >= ts_geom_.px0 - 4 &&
+                            ev.xbutton.x <= ts_geom_.px0 + ts_geom_.pw + 4 &&
+                            ev.xbutton.y >= ts_geom_.py0 &&
+                            ev.xbutton.y <= ts_geom_.py0 + ts_geom_.ph) {
+                            // Start a time-span selection; the grab keeps the
+                            // drag alive when the pointer leaves the chart.
+                            ts_selecting_ = true;
+                            ts_hover_idx_ = -1;
+                            ts_sel_x0_ = ts_sel_x1_ =
+                                std::clamp(ev.xbutton.x, (int)ts_geom_.px0,
+                                           (int)(ts_geom_.px0 + ts_geom_.pw));
+                            XGrabPointer(dpy_, ts_win_, False,
+                                         ButtonReleaseMask | PointerMotionMask,
+                                         GrabModeAsync, GrabModeAsync, None, None,
+                                         CurrentTime);
+                            draw_ts();
+                        } else if (ev.xbutton.button == Button3) {
+                            ts_v0_ = 0; ts_v1_ = 1;   // right-click resets the zoom
+                            ts_cache_dirty_ = true;
+                            draw_ts();
+                        }
+                        break;
+                    case ButtonRelease:
+                        if (ev.xbutton.button == Button1 && ts_selecting_) {
+                            XUngrabPointer(dpy_, CurrentTime);   // pair of the grab
+                            ts_selecting_ = false;
+                            double a = std::min(ts_sel_x0_, ts_sel_x1_);
+                            double b = std::max(ts_sel_x0_, ts_sel_x1_);
+                            int n = ts_geom_.n;
+                            auto t_at = [&](double x) {
+                                double f = std::clamp((x - ts_geom_.px0) / ts_geom_.pw,
+                                                      0.0, 1.0);
+                                return ts_geom_.v0 + f * (ts_geom_.v1 - ts_geom_.v0);
+                            };
+                            // Zoom only for a real drag that spans at least two
+                            // samples; a click is left as a no-op.
+                            if (b - a >= 5 && n > 1) {
+                                double w0 = t_at(a), w1 = t_at(b);
+                                if (w1 - w0 >= 1.5 / (n - 1)) {
+                                    ts_v0_ = w0; ts_v1_ = w1;
+                                    ts_cache_dirty_ = true;
+                                }
+                            }
+                            draw_ts();
+                        }
+                        break;
                     case MotionNotify: {
                         // Coalesce queued motions so a fast move redraws once.
                         XEvent latest = ev;
@@ -2823,14 +2944,17 @@ int App::run() {
                                                       &latest))
                             ;
                         int mx = latest.xmotion.x, my = latest.xmotion.y;
+                        if (ts_selecting_) {
+                            ts_sel_x1_ = std::clamp(mx, (int)ts_geom_.px0,
+                                                    (int)(ts_geom_.px0 + ts_geom_.pw));
+                            draw_ts();
+                            break;
+                        }
                         int idx = -1;
                         if (ts_geom_.n > 0 && ts_geom_.pw > 0 &&
                             mx >= ts_geom_.px0 - 4 && mx <= ts_geom_.px0 + ts_geom_.pw + 4 &&
-                            my >= ts_geom_.py0 && my <= ts_geom_.py0 + ts_geom_.ph) {
-                            double f = (mx - ts_geom_.px0) / ts_geom_.pw;
-                            idx = (ts_geom_.n > 1) ? (int)std::lround(f * (ts_geom_.n - 1)) : 0;
-                            idx = std::clamp(idx, 0, ts_geom_.n - 1);
-                        }
+                            my >= ts_geom_.py0 && my <= ts_geom_.py0 + ts_geom_.ph)
+                            idx = ts_sample_at_x(mx);
                         if (idx != ts_hover_idx_) { ts_hover_idx_ = idx; draw_ts(); }
                         break;
                     }
