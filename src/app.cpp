@@ -103,8 +103,8 @@ uint32_t missing_pixel() {
 // ---- start-up theme selection ------------------------------------------------
 // A manual choice made with the theme button is persisted to
 // ~/.ncvista/theme and wins on later runs; without it the desktop is probed
-// once — GNOME (gsettings), then KDE (kdeglobals), then $GTK_THEME — and
-// dark remains the fallback.
+// once — GNOME-family gsettings (colour scheme, then theme name), then KDE
+// (kdeglobals), then $GTK_THEME — and dark remains the fallback.
 static bool ci_contains(const std::string &hay, const char *needle) {
     auto low = [](std::string s) {
         for (char &c : s) c = (char)std::tolower((unsigned char)c);
@@ -156,11 +156,12 @@ static std::string kdeglobals_scheme() {
     return {};
 }
 
-// GNOME's colour-scheme setting via gsettings; false when the tool or the
-// dconf backend is absent (not a GNOME session), so the probe stays silent.
-static bool gsettings_scheme(std::string &val) {
-    FILE *p = popen("gsettings get org.gnome.desktop.interface color-scheme "
-                    "2>/dev/null", "r");
+// One value from org.gnome.desktop.interface via gsettings; false when the
+// tool or the dconf backend is absent (not a GNOME-family session).
+static bool gsettings_get(const char *key, std::string &val) {
+    const std::string cmd = std::string("gsettings get org.gnome.desktop.interface ")
+                            + key + " 2>/dev/null";
+    FILE *p = popen(cmd.c_str(), "r");
     if (!p) return false;
     char buf[256] = {0};
     bool got = std::fgets(buf, sizeof(buf), p) && buf[0];
@@ -180,14 +181,22 @@ static bool detect_light_theme() {
         }
     }
     std::string v;
-    if (gsettings_scheme(v)) {
+    // GNOME 42+ explicit colour scheme; 'default' / 'no-preference' mean the
+    // user never chose one (many desktops never write this key), so they must
+    // not answer the probe.
+    if (gsettings_get("color-scheme", v)) {
         if (ci_contains(v, "prefer-dark") || ci_contains(v, "\"dark\"") ||
             ci_contains(v, "'dark'"))
             return false;
-        if (ci_contains(v, "default") || ci_contains(v, "light"))
-            return true;                    // explicit light preference
-        // "no-preference" or unreadable: fall through to the next probe.
+        if (ci_contains(v, "prefer-light") || ci_contains(v, "\"light\"") ||
+            ci_contains(v, "'light'"))
+            return true;
     }
+    // Theme names carry the variant on GNOME/Cinnamon/Mint (Yaru-dark,
+    // Mint-Y-Dark-Blue, Adwaita-dark) when colour-scheme was left unset;
+    // 'default' is only the schema default (e.g. gsettings under KDE).
+    if (gsettings_get("gtk-theme", v) && !ci_contains(v, "'default'"))
+        return !ci_contains(v, "dark");
     std::string scheme = kdeglobals_scheme();
     if (!scheme.empty()) return !ci_contains(scheme, "dark");
     if (const char *g = std::getenv("GTK_THEME"); g && *g)
