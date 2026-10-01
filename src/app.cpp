@@ -299,9 +299,11 @@ private:
     int ts_hover_idx_ = -1;              // sample under the mouse pointer (-1 = none)
     double ts_ymin_ = 0, ts_ymax_ = 1;
 
-    // Plot-area geometry from the last chart render, kept for hover hit-testing.
-    double sr_px0_ = 0, sr_py0_ = 0, sr_pw_ = 0, sr_ph_ = 0;
-    int sr_n_ = 0;
+    // Plot-area geometry of a rendered line chart, recorded by draw_series()
+    // into a caller-owned copy: the time-series window's hover hit-testing
+    // must not be clobbered by the main window drawing its 1-D line plot.
+    struct SeriesGeom { double px0 = 0, py0 = 0, pw = 0, ph = 0; int n = 0; };
+    SeriesGeom ts_geom_;                  // chart inside the ts cache
 
     // Cached static chart. The chart (axes, series, current-frame marker) only
     // changes on open/resize, so it is rendered once into an offscreen pixmap and
@@ -318,11 +320,13 @@ private:
     void draw_ts_hover();              // overlay cursor line + bubble for ts_hover_idx_
 
     // Reusable line-chart renderer (used by the time-series window and by the
-    // main plot when the current variable is 1-D).
+    // main plot when the current variable is 1-D). g receives the plot-area
+    // geometry for later hit-testing; each caller owns its copy.
     void draw_series(cairo_t *cr, const Rect &R,
                      const std::vector<double> &xv, const std::vector<double> &yv,
                      double ymin, double ymax, bool is_time,
-                     const std::string &xunits, const std::string &xcal, int cur_idx);
+                     const std::string &xunits, const std::string &xcal, int cur_idx,
+                     SeriesGeom &g);
 
     // ---- 1-D variable shown as a line plot in the main window ------------
     std::vector<double> line_vals_, line_x_;
@@ -2422,7 +2426,7 @@ void App::close_ts_window() {
 }
 
 // Render the static chart (background, titles, axes, series, current-frame
-// marker) into the offscreen cache. Also records the plot-area geometry (sr_*)
+// marker) into the offscreen cache. Also records the plot-area geometry (ts_geom_)
 // used to place the hover cursor.
 void App::build_ts_cache() {
     if (!ts_surf_) return;
@@ -2442,7 +2446,7 @@ void App::build_ts_cache() {
 
     Rect R{0, 46, (double)ts_w_, (double)ts_h_ - 46};
     draw_series(cr, R, ts_x_, ts_vals_, ts_ymin_, ts_ymax_, ts_is_time_,
-                ts_xunits_, ts_xcal_, ts_cur_idx_);
+                ts_xunits_, ts_xcal_, ts_cur_idx_, ts_geom_);
     cairo_destroy(cr);
     ts_cache_dirty_ = false;
 }
@@ -2469,24 +2473,24 @@ void App::draw_ts() {
 // recorded by the last build_ts_cache().
 void App::draw_ts_hover() {
     cairo_t *cr = ts_cr_;
-    int n = sr_n_, idx = ts_hover_idx_;
-    if (idx < 0 || idx >= n || sr_pw_ <= 0 || ts_ymax_ <= ts_ymin_) return;
+    int n = ts_geom_.n, idx = ts_hover_idx_;
+    if (idx < 0 || idx >= n || ts_geom_.pw <= 0 || ts_ymax_ <= ts_ymin_) return;
 
     auto xmap = [&](int i) {
-        return sr_px0_ + (n > 1 ? (double)i / (n - 1) : 0.5) * sr_pw_;
+        return ts_geom_.px0 + (n > 1 ? (double)i / (n - 1) : 0.5) * ts_geom_.pw;
     };
     auto ymap = [&](double v) {
-        return sr_py0_ + sr_ph_ - (v - ts_ymin_) / (ts_ymax_ - ts_ymin_) * sr_ph_;
+        return ts_geom_.py0 + ts_geom_.ph - (v - ts_ymin_) / (ts_ymax_ - ts_ymin_) * ts_geom_.ph;
     };
 
     double x = xmap(idx);
     set_color(cr, COL_TEXT, 0.55);
     cairo_set_line_width(cr, 1);
-    cairo_move_to(cr, x, sr_py0_); cairo_line_to(cr, x, sr_py0_ + sr_ph_);
+    cairo_move_to(cr, x, ts_geom_.py0); cairo_line_to(cr, x, ts_geom_.py0 + ts_geom_.ph);
     cairo_stroke(cr);
 
     bool has = idx < (int)ts_vals_.size() && !std::isnan(ts_vals_[idx]);
-    double y = has ? ymap(ts_vals_[idx]) : sr_py0_ + sr_ph_ / 2;
+    double y = has ? ymap(ts_vals_[idx]) : ts_geom_.py0 + ts_geom_.ph / 2;
     if (has) {
         set_color(cr, RGB{1, 1, 1});
         cairo_arc(cr, x, y, 3.5, 0, 2 * M_PI);
@@ -2507,10 +2511,10 @@ void App::draw_ts_hover() {
     text_size(cr, yl, 12, true, w2, h2);
     double pad = 7;
     double bw = std::max(w1, w2) + 2 * pad, bh = h1 + h2 + 2 * pad + 2;
-    double bx = x + 12, by = (has ? y : sr_py0_ + 10) - bh / 2;
-    if (bx + bw > sr_px0_ + sr_pw_) bx = x - 12 - bw;   // flip left near right edge
-    bx = std::clamp(bx, sr_px0_ + 2, sr_px0_ + sr_pw_ - bw - 2);
-    by = std::clamp(by, sr_py0_ + 2, sr_py0_ + sr_ph_ - bh - 2);
+    double bx = x + 12, by = (has ? y : ts_geom_.py0 + 10) - bh / 2;
+    if (bx + bw > ts_geom_.px0 + ts_geom_.pw) bx = x - 12 - bw;   // flip left near right edge
+    bx = std::clamp(bx, ts_geom_.px0 + 2, ts_geom_.px0 + ts_geom_.pw - bw - 2);
+    by = std::clamp(by, ts_geom_.py0 + 2, ts_geom_.py0 + ts_geom_.ph - bh - 2);
 
     set_color(cr, COL_PANEL2, 0.95);
     rounded_rect(cr, bx, by, bw, bh, 5);
@@ -2525,18 +2529,20 @@ void App::draw_ts_hover() {
 }
 
 // Draw a line chart of (xv, yv) within rectangle R. cur_idx (>= 0) highlights a
-// sample (the current animation frame); pass -1 for none.
+// sample (the current animation frame); pass -1 for none. g records the plot-area
+// geometry for the caller's later hover hit-testing.
 void App::draw_series(cairo_t *cr, const Rect &R,
                       const std::vector<double> &xv, const std::vector<double> &yv,
                       double ymin, double ymax, bool is_time,
-                      const std::string &xunits, const std::string &xcal, int cur_idx) {
+                      const std::string &xunits, const std::string &xcal, int cur_idx,
+                      SeriesGeom &g) {
     const double ml = 64, mr = 16, mt = 10, mb = 34;
     double px0 = R.x + ml, py0 = R.y + mt, pw = R.w - ml - mr, ph = R.h - mt - mb;
     if (pw < 20 || ph < 20) return;
     if (ymax <= ymin) ymax = ymin + 1;
 
     int n = (int)yv.size();
-    sr_px0_ = px0; sr_py0_ = py0; sr_pw_ = pw; sr_ph_ = ph; sr_n_ = n;
+    g = SeriesGeom{px0, py0, pw, ph, n};
     auto xmap = [&](int i) { return px0 + (n > 1 ? (double)i / (n - 1) : 0.5) * pw; };
     auto ymap = [&](double val) { return py0 + ph - (val - ymin) / (ymax - ymin) * ph; };
 
@@ -2621,8 +2627,10 @@ void App::draw_series(cairo_t *cr, const Rect &R,
 
 // The main-window line plot for a 1-D variable.
 void App::draw_plot_line() {
+    SeriesGeom lg;    // nothing hit-tests the main-window line plot; keep its
+                      // geometry out of an open time-series window's copy
     draw_series(cr_, r_plot_, line_x_, line_vals_, line_ymin_, line_ymax_,
-                line_is_time_, line_xunits_, line_xcal_, -1);
+                line_is_time_, line_xunits_, line_xcal_, -1, lg);
 }
 
 // ---- main loop -------------------------------------------------------------
@@ -2798,12 +2806,12 @@ int App::run() {
                             ;
                         int mx = latest.xmotion.x, my = latest.xmotion.y;
                         int idx = -1;
-                        if (sr_n_ > 0 && sr_pw_ > 0 &&
-                            mx >= sr_px0_ - 4 && mx <= sr_px0_ + sr_pw_ + 4 &&
-                            my >= sr_py0_ && my <= sr_py0_ + sr_ph_) {
-                            double f = (mx - sr_px0_) / sr_pw_;
-                            idx = (sr_n_ > 1) ? (int)std::lround(f * (sr_n_ - 1)) : 0;
-                            idx = std::clamp(idx, 0, sr_n_ - 1);
+                        if (ts_geom_.n > 0 && ts_geom_.pw > 0 &&
+                            mx >= ts_geom_.px0 - 4 && mx <= ts_geom_.px0 + ts_geom_.pw + 4 &&
+                            my >= ts_geom_.py0 && my <= ts_geom_.py0 + ts_geom_.ph) {
+                            double f = (mx - ts_geom_.px0) / ts_geom_.pw;
+                            idx = (ts_geom_.n > 1) ? (int)std::lround(f * (ts_geom_.n - 1)) : 0;
+                            idx = std::clamp(idx, 0, ts_geom_.n - 1);
                         }
                         if (idx != ts_hover_idx_) { ts_hover_idx_ = idx; draw_ts(); }
                         break;
