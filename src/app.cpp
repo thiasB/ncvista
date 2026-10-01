@@ -1818,6 +1818,13 @@ void App::on_button(int bx, int by, int button) {
             by >= plot_oy_ && by <= plot_oy_ + plot_dh_) {
             selecting_ = true;
             sel_x0_ = bx; sel_y0_ = by;
+            // Grab the pointer for the duration of the drag so the release is
+            // delivered even when the drag ends outside the window; without
+            // it, a release elsewhere leaves selecting_ stuck true and the
+            // rubber band then chases the pointer with no button held.
+            XGrabPointer(dpy_, win_, False,
+                         ButtonReleaseMask | PointerMotionMask,
+                         GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
             return;
         }
     }
@@ -2877,6 +2884,7 @@ int App::run() {
                     drag_sidebar_ = false;
                     plot_sb_drag_ = 0;
                     if (ev.xbutton.button == Button1 && selecting_) {
+                        XUngrabPointer(dpy_, CurrentTime);  // pair of the grab
                         end_selection(ev.xbutton.x, ev.xbutton.y);
                         render();
                     }
