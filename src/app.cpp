@@ -1435,6 +1435,9 @@ void App::draw_overlay(const Coastlines &src, LineOverlay &ov, const RGB &core,
 void App::draw_projected() {
     const Rect &R = r_plot_;
     plot_s_ = 0; plot_nx_ = plot_ny_ = 0;   // no field click/hover in projected mode
+    r_plot_vsb_ = r_plot_hsb_ = Rect{};     // (draw_plot's clear is never reached
+                                            //  here: a zoom set in equirectangular
+                                            //  mode would leave invisible pan strips)
     if (!slice_.valid || slice_.nx <= 0 || slice_.ny <= 0 ||
         xcoord_.size() < 2 || ycoord_.size() < 2)
         return;
