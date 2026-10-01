@@ -1120,6 +1120,8 @@ void App::draw_plot() {
     if (projected()) { draw_projected(); return; }
 
     if (!slice_.valid || slice_.nx <= 0 || slice_.ny <= 0) {
+        plot_s_ = 0; plot_nx_ = plot_ny_ = 0;   // disable field click/hover targets
+        r_plot_vsb_ = r_plot_hsb_ = Rect{};     // (incl. stale pan-scrollbars)
         draw_text(cr_, "no data", R.x + R.w / 2 - 30, R.y + R.h / 2, COL_TEXT_DIM, 14);
         return;
     }
