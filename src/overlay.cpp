@@ -12,9 +12,19 @@ bool load_coastlines(const std::string &path, Coastlines &out) {
     FILE *f = std::fopen(path.c_str(), "rb");
     if (!f) return false;
 
+    // Every count read below is bounded by the bytes actually present: the
+    // absolute caps alone would let a handful of bytes demand hundreds of MB
+    // of allocations before the first short read rejected the file.
+    std::fseek(f, 0, SEEK_END);
+    const long long fsize = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (fsize < 0) { std::fclose(f); return false; }   // not seekable
+
     int32_t nlines = 0;
+    long long used = 4;                                // the count just read
     if (std::fread(&nlines, sizeof(int32_t), 1, f) != 1 || nlines <= 0 ||
-        nlines > 5'000'000) {
+        nlines > 5'000'000 ||
+        (long long)nlines * 4 > fsize - used) {        // each line: >= 4 bytes
         std::fclose(f);
         return false;
     }
@@ -22,7 +32,8 @@ bool load_coastlines(const std::string &path, Coastlines &out) {
     for (int32_t i = 0; i < nlines; ++i) {
         int32_t npts = 0;
         if (std::fread(&npts, sizeof(int32_t), 1, f) != 1 || npts < 0 ||
-            npts > 50'000'000) {
+            npts > 50'000'000 ||
+            (long long)npts * 8 > fsize - used - 4) {  // points left in file
             std::fclose(f);
             out.lines.clear();
             return false;
@@ -38,6 +49,7 @@ bool load_coastlines(const std::string &path, Coastlines &out) {
             }
             line[k] = {xy[0], xy[1]};
         }
+        used += 4 + 8ll * npts;
         out.lines.push_back(std::move(line));
     }
     std::fclose(f);
