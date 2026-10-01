@@ -1731,12 +1731,14 @@ void App::on_button(int bx, int by, int button) {
         // Colorbar bound fields: click to edit min / max. The field is prefilled
         // with the current value (Enter applies, Esc cancels).
         if (r_cbmax_.hit(bx, by)) {
-            if (editing_ != 2) { editing_ = 2; edit_buf_ = fmt_num(vmax_); }
+            // Clicking the other field commits the in-progress edit rather
+            // than discarding the typed value.
+            if (editing_ != 2) { commit_edit(); editing_ = 2; edit_buf_ = fmt_num(vmax_); }
             edit_cursor_ = edit_index_from_x(r_cbmax_, bx);  // caret where clicked
             return;
         }
         if (r_cbmin_.hit(bx, by)) {
-            if (editing_ != 1) { editing_ = 1; edit_buf_ = fmt_num(vmin_); }
+            if (editing_ != 1) { commit_edit(); editing_ = 1; edit_buf_ = fmt_num(vmin_); }
             edit_cursor_ = edit_index_from_x(r_cbmin_, bx);  // caret where clicked
             return;
         }
