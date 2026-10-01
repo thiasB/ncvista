@@ -1958,6 +1958,9 @@ void App::on_motion(int mx, int my) {
         const SliderUI &sl = sliders_[drag_slider_];
         int p = sl.dimpos;
         size_t len = nc_.dim(cur().dimids[p]).len;
+        if (sl.track.w <= 0 || len < 1) return;   // a zero-width track divides
+                                                   // by zero: NaN slips past
+                                                   // std::clamp into fixed_[p]
         double frac = (mx - sl.track.x) / sl.track.w;
         frac = std::clamp(frac, 0.0, 1.0);
         size_t idx = (size_t)std::lround(frac * (len - 1));
