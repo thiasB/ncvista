@@ -81,9 +81,10 @@ coastline overlay](docs/screenshot.png)
   the toolbar switches the whole UI chrome (windows, sidebar, colorbar,
   metadata and time-series windows included) between the two palettes; the data
   colormaps are unaffected. At start-up ncvista follows the desktop's
-  colour-scheme preference (GNOME `gsettings`, then KDE `kdeglobals`, then
-  `$GTK_THEME`); a manual choice is remembered in `~/.ncvista/theme` and takes
-  precedence on later runs.
+  colour-scheme preference (GNOME-family `gsettings` colour scheme and theme
+  name, e.g. `Yaru-dark`, then KDE `kdeglobals`, then `$GTK_THEME`); a manual
+  choice is remembered in `~/.ncvista/theme` and takes precedence on later
+  runs.
 - Units are shown verbatim as written in the file's `units` attribute (factor
   order preserved, e.g. `kg m-2`). udunits is still used for time-axis decoding
   for standard/gregorian/proleptic calendars, with arithmetic fallbacks for the
@@ -185,6 +186,30 @@ export UDUNITS2_XML_PATH="$PREFIX/share/udunits/udunits2.xml"
 ```
 
 where `$PREFIX` is your netCDF/udunits install prefix.
+
+### Install
+
+```sh
+cmake --install build          # into /usr/local by default (needs write access)
+```
+
+The install prefix is the CMake cache variable `CMAKE_INSTALL_PREFIX`. Set it when
+configuring to install elsewhere — e.g. under your home directory, no root needed:
+
+```sh
+cmake -S . -B build -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+cmake --build build -j
+cmake --install build
+```
+
+A one-off relocation of an already configured build is possible with
+`cmake --install build --prefix DIR`.
+
+Installs the `ncvista` binary to `<prefix>/bin/`, and — when present — the overlay
+data files to `<prefix>/share/ncvista/`. The binary keeps finding them there (and
+the netCDF/udunits libraries in `HPC_PREFIX/lib`) via the install prefix and rpath
+baked in at build time; see [Coastline / border data](#coastline--border-data) for
+the full runtime lookup order of the overlay files.
 
 ## Usage
 
