@@ -2666,7 +2666,8 @@ int App::run() {
     XSetWindowAttributes attrs;
     attrs.background_pixel = BlackPixel(dpy_, screen);
     attrs.event_mask = ExposureMask | KeyPressMask | ButtonPressMask |
-                       ButtonReleaseMask | PointerMotionMask | StructureNotifyMask;
+                       ButtonReleaseMask | PointerMotionMask |
+                       LeaveWindowMask | StructureNotifyMask;
     win_ = XCreateWindow(dpy_, root, 0, 0, width_, height_, 0,
                          DefaultDepth(dpy_, screen), InputOutput,
                          DefaultVisual(dpy_, screen),
@@ -2911,6 +2912,18 @@ int App::run() {
                     if (motion_needs_render()) render();
                     break;
                 }
+                case LeaveNotify:
+                    // The synthetic crossings around a pointer grab (the
+                    // rubber-band drag grabs) are not real leaves.
+                    if (ev.xcrossing.mode != NotifyNormal) break;
+                    if (selecting_ || drag_sidebar_ || plot_sb_drag_ ||
+                        drag_slider_ >= 0) break;          // drags keep tracking
+                    // Drop the hover readout/crosshair: with the pointer gone no
+                    // further motion arrives, so they would otherwise freeze at
+                    // the edge and be redrawn on every animation frame.
+                    mouse_x_ = mouse_y_ = -1;
+                    if (motion_needs_render()) render();
+                    break;
                 case KeyPress: {
                     KeySym ks = XLookupKeysym(&ev.xkey, 0);
                     if (editing_) {            // typing into a bound field
