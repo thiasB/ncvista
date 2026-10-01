@@ -93,6 +93,28 @@ static void civil_from_days(long z, int &y, unsigned &m, unsigned &d) {
     y += (m <= 2);
 }
 
+// Julian-calendar civil date for a Unix-epoch day number (proleptic Julian,
+// leap every 4 years — the Julian side of the CF "standard" calendar).
+static void civil_from_days_julian(long z, int &y, unsigned &m, unsigned &d) {
+    long jdn = z + 2440588;             // Unix epoch 1970-01-01 = JDN 2440588
+    long c = jdn + 32082;
+    long yy = (4 * c + 3) / 1461;
+    long e = c - (1461 * yy) / 4;
+    long mp = (5 * e + 2) / 153;
+    d = (unsigned)(e - (153 * mp + 2) / 5 + 1);
+    m = (unsigned)(mp + 3 - 12 * (mp / 10));
+    y = (int)(yy - 4800 + mp / 10);
+}
+
+// CF "standard" (mixed Julian/Gregorian) civil date: Gregorian from the
+// reform's first day 1582-10-15 (JDN 2299161), Julian before — the last
+// Julian day is 1582-10-04 (JDN 2299160). The ten omitted days 1582-10-05..14
+// can never be produced: the JDN→civil mapping jumps straight across them.
+static void civil_from_days_mixed(long z, int &y, unsigned &m, unsigned &d) {
+    if (z + 2440588 >= 2299161) civil_from_days(z, y, m, d);
+    else civil_from_days_julian(z, y, m, d);
+}
+
 static bool is_leap(int y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
 static int days_in_year(int y) { return is_leap(y) ? 366 : 365; }
 static int days_in_month(int y, int m) {
@@ -118,6 +140,13 @@ std::string Units::format_time(const std::string &spec, const std::string &calen
 
     const bool standard = cal.empty() || cal == "standard" || cal == "gregorian" ||
                           cal == "proleptic_gregorian" || cal == "julian";
+    // CF "standard"/"gregorian" mean the mixed Julian/Gregorian calendar:
+    // udunits already parses pre-reform reference dates as Julian civil dates
+    // (its default calendar), so the instant is right — but it must be printed
+    // back with Julian civil rules before 1582-10-15, not via gmtime_r's
+    // proleptic Gregorian, or every pre-reform date shifts by the calendar
+    // offset (~10 days around 1500).
+    const bool mixed = cal.empty() || cal == "standard" || cal == "gregorian";
 
     // "years since"/"months since" need calendar-aware handling: udunits treats
     // a year as a fixed 365.2422-day duration, which drifts from the civil
@@ -137,11 +166,26 @@ std::string Units::format_time(const std::string &spec, const std::string &calen
                 if (cv) {
                     double secs = cv_convert_double(cv, value);
                     cv_free(cv);
-                    time_t tt = (time_t)std::llround(secs);
-                    struct tm tmv;
-                    if (gmtime_r(&tt, &tmv)) {
-                        out = fmt_date(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
-                                       tmv.tm_hour, tmv.tm_min, (double)tmv.tm_sec);
+                    if (std::isfinite(secs)) {
+                        long long si = (long long)std::llround(secs);
+                        if (mixed) {
+                            // Split the absolute instant and format it with
+                            // mixed Julian/Gregorian civil rules.
+                            long long day = (si >= 0 ? si : si - 86399) / 86400;
+                            long long rem = si - day * 86400;
+                            int hh = (int)(rem / 3600), mi = (int)(rem / 60 % 60),
+                                ss = (int)(rem % 60);
+                            int Y; unsigned Mo, D;
+                            civil_from_days_mixed((long)day, Y, Mo, D);
+                            out = fmt_date(Y, (int)Mo, (int)D, hh, mi, (double)ss);
+                        } else {
+                            time_t tt = (time_t)si;
+                            struct tm tmv;
+                            if (gmtime_r(&tt, &tmv)) {
+                                out = fmt_date(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                                               tmv.tm_hour, tmv.tm_min, (double)tmv.tm_sec);
+                            }
+                        }
                     }
                 }
             }

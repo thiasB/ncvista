@@ -244,8 +244,11 @@ python3 scripts/make_overlays.py ne_110m_admin_0_boundary_lines_land.shp borders
   non-time dimensions are used as Y, X, so a time axis is never plotted as a
   map axis. Curvilinear/unstructured grids are drawn in index space.
 - Time decoding for the standard calendar uses udunits' conversion to a
-  reference epoch and POSIX `gmtime` (proleptic Gregorian, no leap seconds),
-  which is accurate for typical climate-data date ranges.
+  reference epoch followed by a mixed Julian/Gregorian civil-date conversion
+  (Julian rules before 1582-10-15, Gregorian after, no leap seconds), so dates
+  from pre-reform reference epochs (paleoclimate data) print correctly. The CF
+  `julian` calendar is still decoded with mixed rules, and pre-1582
+  `proleptic_gregorian` reference dates are still parsed as Julian instants.
 
 ## License
 
