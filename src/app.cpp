@@ -48,19 +48,54 @@ struct Rect {
 
 struct RGB { double r, g, b; };
 
-// Dark, modern palette.
-const RGB COL_BG        = {0.114, 0.125, 0.149};
-const RGB COL_PANEL     = {0.157, 0.173, 0.204};
-const RGB COL_PANEL2    = {0.196, 0.216, 0.255};
-const RGB COL_ACCENT    = {0.298, 0.686, 0.875};
-const RGB COL_ACCENT_D  = {0.180, 0.480, 0.650};
-const RGB COL_TEXT      = {0.886, 0.910, 0.941};
-const RGB COL_TEXT_DIM  = {0.560, 0.600, 0.650};
-const RGB COL_BORDER    = {0.250, 0.270, 0.310};
-const RGB COL_PLOTBG    = {0.075, 0.082, 0.098};
+// UI chrome colours resolve through the active palette; the toolbar theme
+// button swaps it between the dark and light presets at runtime. Data
+// colormaps are independent of the theme; `missing` is the fill colour for
+// no-data pixels (white on dark, grey on light, so it never matches a light
+// plot background).
+struct Theme {
+    RGB bg, panel, panel2, panel_aux, accent, accent_d, text, text_dim, border,
+        plotbg, missing;
+};
+constexpr Theme THEME_DARK = {
+    {0.114, 0.125, 0.149},   // bg
+    {0.157, 0.173, 0.204},   // panel
+    {0.196, 0.216, 0.255},   // panel2 (raised / hovered)
+    {0.135, 0.149, 0.176},   // panel_aux (recessed: dimmed aux variables)
+    {0.298, 0.686, 0.875},   // accent
+    {0.180, 0.480, 0.650},   // accent_d (dimmed accent)
+    {0.886, 0.910, 0.941},   // text
+    {0.560, 0.600, 0.650},   // text_dim
+    {0.250, 0.270, 0.310},   // border
+    {0.075, 0.082, 0.098},   // plotbg
+    {1.000, 1.000, 1.000},   // missing -> white
+};
+constexpr Theme THEME_LIGHT = {
+    {0.925, 0.933, 0.945},
+    {0.859, 0.871, 0.890},
+    {0.780, 0.800, 0.840},
+    {0.882, 0.894, 0.914},   // panel_aux: recedes toward bg in a light chrome
+    {0.160, 0.500, 0.700},
+    {0.412, 0.639, 0.784},
+    {0.102, 0.122, 0.157},
+    {0.349, 0.388, 0.451},
+    {0.678, 0.706, 0.753},
+    {0.976, 0.980, 0.988},
+    {0.620, 0.650, 0.700},   // missing -> grey on the near-white plot
+};
+inline Theme pal = THEME_DARK;
 
 void set_color(cairo_t *cr, const RGB &c, double a = 1.0) {
     cairo_set_source_rgba(cr, c.r, c.g, c.b, a);
+}
+
+// The theme's missing/fill colour as a 0xAARRGGBB image pixel.
+uint32_t missing_pixel() {
+    auto q = [](double v) {
+        return (uint32_t)std::lround(std::clamp(v, 0.0, 1.0) * 255.0);
+    };
+    return (0xFFu << 24) | (q(pal.missing.r) << 16) |
+           (q(pal.missing.g) << 8) | q(pal.missing.b);
 }
 
 void rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r) {
@@ -156,6 +191,7 @@ private:
     int ydim_ = -1, xdim_ = -1;        // dim positions plotted as rows (y) / cols (x)
     Slice slice_;
     bool flip_y_ = false;
+    bool light_theme_ = false;          // toolbar switch; default dark
     bool auto_range_ = false;           // start with a fixed (global) range
     bool symmetric_ = false;            // force the scale symmetric around zero
     bool reversed_ = false;             // reverse the colour scale direction
@@ -320,6 +356,7 @@ private:
     int ts_cache_w_ = 0, ts_cache_h_ = 0;
     bool ts_cache_dirty_ = true;
 
+    void toggle_theme();                 // dark <-> light palette + full redraw
     void open_ts_window(size_t yidx, size_t xidx);
     void close_ts_window();
     void draw_ts();
@@ -372,7 +409,7 @@ private:
     void apply_default_size();         // size the window for a global lon/lat grid
 
     Rect r_sidebar_, r_plot_, r_colorbar_, r_toolbar_, r_header_;
-    Rect r_first_, r_play_, r_prev_, r_next_, r_cmap_, r_flip_, r_range_, r_coast_, r_borders_, r_proj_, r_info_;
+    Rect r_first_, r_play_, r_prev_, r_next_, r_cmap_, r_flip_, r_range_, r_coast_, r_borders_, r_proj_, r_info_, r_theme_;
     Rect r_cbmax_, r_cbmin_;           // editable colorbar bound fields
     Rect r_sym_;                       // symmetric-around-zero toggle
     Rect r_cmaprev_;                   // reverse-colour-scale toggle
@@ -646,6 +683,8 @@ void App::layout() {
     consider("╌ borders ✓");
     consider("♁ Gall-Peters");
     consider("ⓘ metadata");
+    consider("☀ light");
+    consider("☾ dark");
     bw += 24;                              // horizontal padding inside the button
 
     // The fixed/auto range toggle lives above the colour scale (see
@@ -658,6 +697,7 @@ void App::layout() {
     r_borders_ = {bx, by, bw, bh}; bx += bw + gap;
     r_proj_    = {bx, by, bw, bh}; bx += bw + gap;
     r_info_    = {bx, by, bw, bh};
+    r_theme_   = {(double)width_ - pad - bw, by, bw, bh};  // far right edge
 
     r_sidebar_ = {0, toolbar_h, sidebar_w, (double)height_ - toolbar_h};
 
@@ -747,7 +787,7 @@ void App::render() {
     if (!back_ || !cr_) return;
     layout();
     // Draw the whole frame off-screen.
-    set_color(cr_, COL_BG);
+    set_color(cr_, pal.bg);
     cairo_paint(cr_);
     draw_sidebar();
     draw_plot();
@@ -771,23 +811,23 @@ void App::render() {
 static void draw_button(cairo_t *cr, const Rect &r, const std::string &label,
                         bool active, bool accent) {
     rounded_rect(cr, r.x, r.y, r.w, r.h, 6);
-    if (accent) set_color(cr, active ? COL_ACCENT : COL_ACCENT_D);
-    else set_color(cr, active ? COL_PANEL2 : COL_PANEL);
+    if (accent) set_color(cr, active ? pal.accent : pal.accent_d);
+    else set_color(cr, active ? pal.panel2 : pal.panel);
     cairo_fill_preserve(cr);
-    set_color(cr, COL_BORDER);
+    set_color(cr, pal.border);
     cairo_set_line_width(cr, 1);
     cairo_stroke(cr);
     double tw, th;
     text_size(cr, label, 13, true, tw, th);
     draw_text(cr, label, r.x + (r.w - tw) / 2, r.y + (r.h - th) / 2,
-              accent ? RGB{1, 1, 1} : COL_TEXT, 13, true);
+              accent ? RGB{1, 1, 1} : pal.text, 13, true);
 }
 
 void App::draw_toolbar() {
     rounded_rect(cr_, 0, 0, width_, r_toolbar_.h, 0);
-    set_color(cr_, COL_PANEL);
+    set_color(cr_, pal.panel);
     cairo_fill(cr_);
-    cairo_set_source_rgba(cr_, COL_BORDER.r, COL_BORDER.g, COL_BORDER.b, 1);
+    cairo_set_source_rgba(cr_, pal.border.r, pal.border.g, pal.border.b, 1);
     cairo_set_line_width(cr_, 1);
     cairo_move_to(cr_, 0, r_toolbar_.h);
     cairo_line_to(cr_, width_, r_toolbar_.h);
@@ -804,6 +844,8 @@ void App::draw_toolbar() {
     draw_button(cr_, r_proj_, std::string("♁ ") + proj::name(proj_idx_),
                 projected(), false);
     draw_button(cr_, r_info_, "ⓘ metadata", meta_win_ != 0, false);
+    draw_button(cr_, r_theme_, light_theme_ ? "☀ light" : "☾ dark",
+                light_theme_, false);
 
     // File name, ellipsized to the space left of the toolbar's right edge.
     const std::string &full = nc_.path();
@@ -812,11 +854,11 @@ void App::draw_toolbar() {
     if (sl != std::string::npos) title = title.substr(sl + 1);
 
     double x0 = r_info_.x + r_info_.w + 16;
-    double avail = width_ - 12 - x0;
+    double avail = r_theme_.x - 16 - x0;    // stop clear of the theme switch
     if (avail < 20) avail = 20;
     double tw, th;
     text_size(cr_, title, 13, false, tw, th);
-    draw_text(cr_, title, x0, (r_toolbar_.h - 16) / 2, COL_TEXT_DIM, 13, false,
+    draw_text(cr_, title, x0, (r_toolbar_.h - 16) / 2, pal.text_dim, 13, false,
               PANGO_ALIGN_LEFT, avail);
 
     // When the name doesn't fit, reveal the complete file name (no folder
@@ -831,22 +873,22 @@ void App::draw_toolbar() {
         double bx = std::clamp(x0, 8.0, std::max(8.0, (double)width_ - fw - 8));
         double by = r_toolbar_.h + 6;
         rounded_rect(cr_, bx - 6, by - 4, fw + 12, fh + 8, 5);
-        set_color(cr_, COL_PANEL, 0.97);
+        set_color(cr_, pal.panel, 0.97);
         cairo_fill_preserve(cr_);
-        set_color(cr_, COL_BORDER);
+        set_color(cr_, pal.border);
         cairo_set_line_width(cr_, 1);
         cairo_stroke(cr_);
-        draw_text(cr_, title, bx, by, COL_TEXT, 12, false);
+        draw_text(cr_, title, bx, by, pal.text, 12, false);
     }
 }
 
 void App::draw_sidebar() {
-    set_color(cr_, COL_PANEL);
+    set_color(cr_, pal.panel);
     cairo_rectangle(cr_, r_sidebar_.x, r_sidebar_.y, r_sidebar_.w, r_sidebar_.h);
     cairo_fill(cr_);
 
     draw_text(cr_, "VARIABLES", r_sidebar_.x + 14, r_sidebar_.y + 12,
-              COL_TEXT_DIM, 11, true);
+              pal.text_dim, 11, true);
 
     r_varitems_.clear();
     const auto &disp = nc_.displayable();
@@ -861,18 +903,18 @@ void App::draw_sidebar() {
             bool sel = (disp[i] == cur_var_);
             rounded_rect(cr_, r.x, r.y, r.w, r.h, 6);
             // Supporting variables are dimmed to set them apart from data fields.
-            RGB base = v.aux ? RGB{0.135, 0.149, 0.176} : COL_PANEL2;
-            set_color(cr_, sel ? COL_ACCENT_D : base);
+            RGB base = v.aux ? pal.panel_aux : pal.panel2;
+            set_color(cr_, sel ? pal.accent_d : base);
             cairo_fill(cr_);
             draw_text(cr_, v.name, r.x + 10, r.y + 6,
-                      sel ? RGB{1, 1, 1} : (v.aux ? COL_TEXT_DIM : COL_TEXT), 13,
+                      sel ? RGB{1, 1, 1} : (v.aux ? pal.text_dim : pal.text), 13,
                       true, PANGO_ALIGN_LEFT, r.w - 20);
             std::string sub = v.long_name.empty() ? "" : v.long_name;
             if (!v.units.empty())
                 sub += (sub.empty() ? "" : "  ") + ("[" + units_.pretty(v.units) + "]");
             if (!sub.empty())
                 draw_text(cr_, sub, r.x + 10, r.y + 23,
-                          sel ? RGB{0.85, 0.92, 0.97} : COL_TEXT_DIM, 11, false,
+                          sel ? RGB{0.85, 0.92, 0.97} : pal.text_dim, 11, false,
                           PANGO_ALIGN_LEFT, r.w - 20);
         }
         iy += ih;
@@ -888,7 +930,7 @@ void App::draw_sidebar() {
         double maxscroll = content - track_h;
         double bar_y = track_y + (track_h - bar_h) * (sidebar_scroll_ / maxscroll);
         rounded_rect(cr_, track_x, bar_y, 5, bar_h, 2.5);
-        set_color(cr_, COL_ACCENT, drag_sidebar_ ? 0.9 : 0.6);
+        set_color(cr_, pal.accent, drag_sidebar_ ? 0.9 : 0.6);
         cairo_fill(cr_);
         r_sb_track_ = {track_x - 3, track_y, 11, track_h};   // generous hit area
     } else {
@@ -927,15 +969,15 @@ void App::draw_var_tooltip() {
     double by = std::clamp(mouse_y_ + 16.0, 8.0, std::max(8.0, height_ - boxh - 8));
 
     rounded_rect(cr_, bx, by, boxw, boxh, 6);
-    set_color(cr_, COL_PANEL, 0.98);
+    set_color(cr_, pal.panel, 0.98);
     cairo_fill_preserve(cr_);
-    set_color(cr_, COL_BORDER);
+    set_color(cr_, pal.border);
     cairo_set_line_width(cr_, 1);
     cairo_stroke(cr_);
 
-    draw_text(cr_, l1, bx + padx, by + pady, COL_TEXT, 13, true);
+    draw_text(cr_, l1, bx + padx, by + pady, pal.text, 13, true);
     if (!l2.empty())
-        draw_text(cr_, l2, bx + padx, by + pady + h1 + gap, COL_TEXT_DIM, 11, false);
+        draw_text(cr_, l2, bx + padx, by + pady + h1 + gap, pal.text_dim, 11, false);
 }
 
 // The button under the pointer (with its tooltip text), or nullptr. Shared by
@@ -956,6 +998,7 @@ const Rect *App::button_tip_hit(const char **desc) const {
         {&r_borders_, "Toggle country-border overlay"},
         {&r_proj_,  "Choose map projection (geographic data)"},
         {&r_info_,  "Open the metadata window"},
+        {&r_theme_, "Switch between dark and light theme"},
     };
     for (const auto &it : items)
         if (it.r->hit(mouse_x_, mouse_y_)) {
@@ -983,12 +1026,12 @@ void App::draw_button_tooltip() {
     if (by + boxh > height_ - 6) by = br->y - boxh - 6;   // …or above near the edge
 
     rounded_rect(cr_, bx, by, boxw, boxh, 5);
-    set_color(cr_, COL_PANEL, 0.97);
+    set_color(cr_, pal.panel, 0.97);
     cairo_fill_preserve(cr_);
-    set_color(cr_, COL_BORDER);
+    set_color(cr_, pal.border);
     cairo_set_line_width(cr_, 1);
     cairo_stroke(cr_);
-    draw_text(cr_, desc, bx + padx, by + pady, COL_TEXT, 12, false);
+    draw_text(cr_, desc, bx + padx, by + pady, pal.text, 12, false);
 }
 
 // The colour-map button opens this dropdown: one row per palette, each with a
@@ -1004,9 +1047,9 @@ void App::draw_cmap_menu() {
     double mh = rowh * cmaps_.size() + 6;
 
     rounded_rect(cr_, mx, my, mw, mh, 6);
-    set_color(cr_, COL_PANEL, 0.98);
+    set_color(cr_, pal.panel, 0.98);
     cairo_fill_preserve(cr_);
-    set_color(cr_, COL_BORDER);
+    set_color(cr_, pal.border);
     cairo_set_line_width(cr_, 1);
     cairo_stroke(cr_);
 
@@ -1017,7 +1060,7 @@ void App::draw_cmap_menu() {
         bool hov = r.hit(mouse_x_, mouse_y_);
         if (sel || hov) {
             rounded_rect(cr_, r.x + 3, r.y + 1, r.w - 6, r.h - 2, 4);
-            set_color(cr_, sel ? COL_ACCENT_D : COL_PANEL2);
+            set_color(cr_, sel ? pal.accent_d : pal.panel2);
             cairo_fill(cr_);
         }
         // gradient swatch
@@ -1029,13 +1072,13 @@ void App::draw_cmap_menu() {
             cairo_rectangle(cr_, sxp + xx, syp, 1.0, sh);
             cairo_fill(cr_);
         }
-        set_color(cr_, COL_BORDER);
+        set_color(cr_, pal.border);
         cairo_set_line_width(cr_, 1);
         cairo_rectangle(cr_, sxp, syp, sw, sh);
         cairo_stroke(cr_);
 
         draw_text(cr_, cm.name, sxp + sw + 10, r.y + (rowh - 16) / 2,
-                  sel ? RGB{1, 1, 1} : COL_TEXT, 13, sel);
+                  sel ? RGB{1, 1, 1} : pal.text, 13, sel);
     }
 }
 
@@ -1052,9 +1095,9 @@ void App::draw_proj_menu() {
     double mh = rowh * proj::COUNT + 6;
 
     rounded_rect(cr_, mx, my, mw, mh, 6);
-    set_color(cr_, COL_PANEL, 0.98);
+    set_color(cr_, pal.panel, 0.98);
     cairo_fill_preserve(cr_);
-    set_color(cr_, COL_BORDER);
+    set_color(cr_, pal.border);
     cairo_set_line_width(cr_, 1);
     cairo_stroke(cr_);
 
@@ -1065,11 +1108,11 @@ void App::draw_proj_menu() {
         bool hov = r.hit(mouse_x_, mouse_y_);
         if (sel || hov) {
             rounded_rect(cr_, r.x + 3, r.y + 1, r.w - 6, r.h - 2, 4);
-            set_color(cr_, sel ? COL_ACCENT_D : COL_PANEL2);
+            set_color(cr_, sel ? pal.accent_d : pal.panel2);
             cairo_fill(cr_);
         }
         draw_text(cr_, proj::name(i), r.x + 12, r.y + (rowh - 16) / 2,
-                  sel ? RGB{1, 1, 1} : COL_TEXT, 13, sel);
+                  sel ? RGB{1, 1, 1} : pal.text, 13, sel);
     }
 }
 
@@ -1079,7 +1122,7 @@ void App::draw_proj_menu() {
 void App::draw_wait_overlay(const std::string &msg) {
     if (!back_ || !cr_) return;
     cairo_set_operator(cr_, CAIRO_OPERATOR_OVER);
-    set_color(cr_, COL_BG, 0.55);                 // dim the window behind it
+    set_color(cr_, pal.bg, 0.55);                 // dim the window behind it
     cairo_rectangle(cr_, 0, 0, width_, height_);
     cairo_fill(cr_);
 
@@ -1088,13 +1131,13 @@ void App::draw_wait_overlay(const std::string &msg) {
     double w = std::max(300.0, tw + 48), h = 86;
     double x = (width_ - w) / 2, y = (height_ - h) / 2;
     rounded_rect(cr_, x, y, w, h, 10);
-    set_color(cr_, COL_PANEL);
+    set_color(cr_, pal.panel);
     cairo_fill_preserve(cr_);
-    set_color(cr_, COL_BORDER);
+    set_color(cr_, pal.border);
     cairo_set_line_width(cr_, 1);
     cairo_stroke(cr_);
-    draw_text(cr_, msg, x + 24, y + 22, COL_TEXT, 14, true, PANGO_ALIGN_LEFT, w - 48);
-    draw_text(cr_, "Please wait…", x + 24, y + 48, COL_TEXT_DIM, 12, false,
+    draw_text(cr_, msg, x + 24, y + 22, pal.text, 14, true, PANGO_ALIGN_LEFT, w - 48);
+    draw_text(cr_, "Please wait…", x + 24, y + 48, pal.text_dim, 12, false,
               PANGO_ALIGN_LEFT, w - 48);
 
     // Push the back buffer to the window immediately (blocking read follows).
@@ -1109,7 +1152,7 @@ void App::draw_wait_overlay(const std::string &msg) {
 void App::draw_plot() {
     const Rect &R = r_plot_;
     rounded_rect(cr_, R.x, R.y, R.w, R.h, 8);
-    set_color(cr_, COL_PLOTBG);
+    set_color(cr_, pal.plotbg);
     cairo_fill(cr_);
 
     const NcVar &v = cur();
@@ -1117,7 +1160,7 @@ void App::draw_plot() {
     std::string head = v.name;
     if (!v.long_name.empty()) head = v.long_name + " (" + v.name + ")";
     std::string un = v.units.empty() ? "" : "  [" + units_.pretty(v.units) + "]";
-    draw_text(cr_, head + un, r_header_.x + 4, r_header_.y + 5, COL_TEXT, 15, true,
+    draw_text(cr_, head + un, r_header_.x + 4, r_header_.y + 5, pal.text, 15, true,
               PANGO_ALIGN_LEFT, r_header_.w);
 
     // 1-D variables are drawn as a line plot rather than a 2-D field.
@@ -1133,7 +1176,7 @@ void App::draw_plot() {
     if (!slice_.valid || slice_.nx <= 0 || slice_.ny <= 0) {
         plot_s_ = 0; plot_nx_ = plot_ny_ = 0;   // disable field click/hover targets
         r_plot_vsb_ = r_plot_hsb_ = Rect{};     // (incl. stale pan-scrollbars)
-        draw_text(cr_, "no data", R.x + R.w / 2 - 30, R.y + R.h / 2, COL_TEXT_DIM, 14);
+        draw_text(cr_, "no data", R.x + R.w / 2 - 30, R.y + R.h / 2, pal.text_dim, 14);
         return;
     }
 
@@ -1160,7 +1203,7 @@ void App::draw_plot() {
             for (int xx = 0; xx < nx; ++xx) {
                 double val = slice_.data[(size_t)srcrow * nx + xx];
                 if (std::isnan(val)) {
-                    row[xx] = 0xFFFFFFFFu; // missing / fill -> white
+                    row[xx] = missing_pixel();  // missing / fill -> theme colour
                     continue;
                 }
                 double t = (val - vmin_) / span;
@@ -1276,12 +1319,12 @@ void App::draw_plot() {
         r_plot_vsb_ = {ox + dw - 8, oy, 8, dh};
         double ty = oy + zoom_fy0_ * dh, tH = std::max(20.0, fh * dh);
         rounded_rect(cr_, ox + dw - 7, ty + 1, 5, tH - 2, 2.5);
-        set_color(cr_, COL_ACCENT, plot_sb_drag_ == 1 ? 0.9 : 0.55);
+        set_color(cr_, pal.accent, plot_sb_drag_ == 1 ? 0.9 : 0.55);
         cairo_fill(cr_);
         r_plot_hsb_ = {ox, oy + dh - 8, dw, 8};
         double tx = ox + zoom_fx0_ * dw, tW = std::max(20.0, fw * dw);
         rounded_rect(cr_, tx + 1, oy + dh - 7, tW - 2, 5, 2.5);
-        set_color(cr_, COL_ACCENT, plot_sb_drag_ == 2 ? 0.9 : 0.55);
+        set_color(cr_, pal.accent, plot_sb_drag_ == 2 ? 0.9 : 0.55);
         cairo_fill(cr_);
     } else {
         r_plot_vsb_ = {0, 0, 0, 0};
@@ -1295,9 +1338,9 @@ void App::draw_plot() {
         double rx1 = std::clamp(std::max(sel_x0_, mouse_x_), ox, ox + dw);
         double ry1 = std::clamp(std::max(sel_y0_, mouse_y_), oy, oy + dh);
         cairo_rectangle(cr_, rx0, ry0, rx1 - rx0, ry1 - ry0);
-        set_color(cr_, COL_ACCENT, 0.18);
+        set_color(cr_, pal.accent, 0.18);
         cairo_fill_preserve(cr_);
-        set_color(cr_, COL_ACCENT, 0.9);
+        set_color(cr_, pal.accent, 0.9);
         cairo_set_line_width(cr_, 1.5);
         cairo_stroke(cr_);
         return;
@@ -1329,12 +1372,12 @@ void App::draw_plot() {
         double bxp = std::min(mouse_x_ + 14, R.x + R.w - tw - 16);
         double byp = std::min(mouse_y_ + 14, R.y + R.h - th - 12);
         rounded_rect(cr_, bxp - 6, byp - 4, tw + 12, th + 8, 5);
-        set_color(cr_, COL_PANEL, 0.92);
+        set_color(cr_, pal.panel, 0.92);
         cairo_fill(cr_);
-        draw_text(cr_, txt, bxp, byp, COL_TEXT, 12, true);
+        draw_text(cr_, txt, bxp, byp, pal.text, 12, true);
 
         // crosshair
-        set_color(cr_, COL_ACCENT, 0.6);
+        set_color(cr_, pal.accent, 0.6);
         cairo_set_line_width(cr_, 1);
         cairo_move_to(cr_, mouse_x_, oy); cairo_line_to(cr_, mouse_x_, oy + dh);
         cairo_move_to(cr_, ox, mouse_y_); cairo_line_to(cr_, ox + dw, mouse_y_);
@@ -1497,7 +1540,7 @@ void App::draw_projected() {
                 int ci = (int)std::lround(fc), ri = (int)std::lround(fr);
                 if (ci < 0 || ci >= nx || ri < 0 || ri >= ny) { row[i] = 0; continue; }
                 double val = slice_.data[(size_t)ri * nx + ci];
-                if (std::isnan(val)) { row[i] = 0xFFFFFFFFu; continue; }
+                if (std::isnan(val)) { row[i] = missing_pixel(); continue; }
                 double t = (val - vmin_) / span;
                 if (reversed_) t = 1.0 - t;
                 uint8_t r, g, b; cm.sample(t, r, g, b);
@@ -1622,7 +1665,7 @@ void App::draw_colorbar() {
         cairo_rectangle(cr_, barx, bary + i, barw, 1.5);
         cairo_fill(cr_);
     }
-    set_color(cr_, COL_BORDER);
+    set_color(cr_, pal.border);
     cairo_set_line_width(cr_, 1);
     cairo_rectangle(cr_, barx, bary, barw, barh);
     cairo_stroke(cr_);
@@ -1634,18 +1677,18 @@ void App::draw_colorbar() {
         double f = (double)i / (nticks - 1);
         double val = vmax_ - f * (vmax_ - vmin_);
         double ty = bary + f * barh;
-        set_color(cr_, COL_TEXT_DIM);
+        set_color(cr_, pal.text_dim);
         cairo_move_to(cr_, barx + barw, ty);
         cairo_line_to(cr_, barx + barw + 4, ty);
         cairo_stroke(cr_);
-        draw_text(cr_, fmt_num(val), fx, ty - 8, COL_TEXT_DIM, 13);
+        draw_text(cr_, fmt_num(val), fx, ty - 8, pal.text_dim, 13);
     }
 
     auto draw_field = [&](const Rect &r, bool editing, const std::string &val) {
         rounded_rect(cr_, r.x, r.y, r.w, r.h, 4);
-        set_color(cr_, editing ? COL_PANEL2 : COL_PANEL);
+        set_color(cr_, editing ? pal.panel2 : pal.panel);
         cairo_fill_preserve(cr_);
-        set_color(cr_, editing ? COL_ACCENT : COL_BORDER);
+        set_color(cr_, editing ? pal.accent : pal.border);
         cairo_set_line_width(cr_, editing ? 1.5 : 1);
         cairo_stroke(cr_);
         std::string s = val;
@@ -1653,7 +1696,7 @@ void App::draw_colorbar() {
             size_t c = std::min((size_t)edit_cursor_, val.size());
             s = val.substr(0, c) + "|" + val.substr(c);
         }
-        draw_text(cr_, s, r.x + 5, r.y + 3, editing ? RGB{1, 1, 1} : COL_TEXT, 13,
+        draw_text(cr_, s, r.x + 5, r.y + 3, editing ? RGB{1, 1, 1} : pal.text, 13,
                   false, PANGO_ALIGN_LEFT, r.w - 8);
     };
     draw_field(r_cbmax_, editing_ == 2, editing_ == 2 ? edit_buf_ : fmt_num(vmax_));
@@ -1674,25 +1717,25 @@ void App::draw_sliders() {
         // label — omitted on the time row, where the playback buttons sit
         if (!is_t) {
             draw_text(cr_, nm, r_sidebar_.w + 12 + 12, sl.track.y - 6,
-                      COL_TEXT, 12, true);
+                      pal.text, 12, true);
         }
 
         // track
         rounded_rect(cr_, sl.track.x, sl.track.y, sl.track.w, sl.track.h, 4);
-        set_color(cr_, COL_PANEL2);
+        set_color(cr_, pal.panel2);
         cairo_fill(cr_);
 
         double frac = (len > 1) ? (double)fixed_[p] / (len - 1) : 0.0;
         double knobx = sl.track.x + frac * sl.track.w;
         // filled portion
         rounded_rect(cr_, sl.track.x, sl.track.y, frac * sl.track.w, sl.track.h, 4);
-        set_color(cr_, COL_ACCENT);
+        set_color(cr_, pal.accent);
         cairo_fill(cr_);
         // knob
-        set_color(cr_, COL_ACCENT);
+        set_color(cr_, pal.accent);
         cairo_arc(cr_, knobx, sl.track.y + sl.track.h / 2, 8, 0, 2 * M_PI);
         cairo_fill(cr_);
-        set_color(cr_, COL_BG);
+        set_color(cr_, pal.bg);
         cairo_arc(cr_, knobx, sl.track.y + sl.track.h / 2, 4, 0, 2 * M_PI);
         cairo_fill(cr_);
 
@@ -1701,7 +1744,7 @@ void App::draw_sliders() {
                            std::to_string(fixed_[p] + 1) + "/" +
                            std::to_string(len) + ")";
         draw_text(cr_, vtxt, sl.track.x + sl.track.w + 14, sl.track.y - 6,
-                  COL_TEXT, 12, false);
+                  pal.text, 12, false);
     }
 
     // playback controls, moved from the toolbar into the slider area
@@ -1721,6 +1764,17 @@ void App::step_anim(int delta) {
     n = ((n % (long)len) + (long)len) % (long)len;
     fixed_[anim_dim_] = (size_t)n;
     reload_slice();
+}
+
+// Swap the UI palette and repaint every window. The cached time-series chart
+// carries its old background, so it is flagged for a rebuild.
+void App::toggle_theme() {
+    light_theme_ = !light_theme_;
+    pal = light_theme_ ? THEME_LIGHT : THEME_DARK;
+    ts_cache_dirty_ = true;
+    render();
+    if (ts_win_) draw_ts();
+    if (meta_win_) draw_meta();
 }
 
 void App::on_button(int bx, int by, int button) {
@@ -1801,6 +1855,7 @@ void App::on_button(int bx, int by, int button) {
             else open_meta_window();
             return;
         }
+        if (r_theme_.hit(bx, by)) { toggle_theme(); return; }
         // sidebar scrollbar: start dragging the thumb (or jump to click)
         if (r_sb_track_.hit(bx, by)) {
             drag_sidebar_ = true;
@@ -2285,7 +2340,7 @@ void App::meta_commit_selection() {
 void App::draw_meta() {
     if (!meta_cr_) return;
     cairo_t *cr = meta_cr_;
-    set_color(cr, COL_BG);
+    set_color(cr, pal.bg);
     cairo_paint(cr);
 
     const double mono = 13;
@@ -2301,18 +2356,18 @@ void App::draw_meta() {
     for (size_t li = 0; li < meta_lines_.size(); ++li) {
         const auto &ml = meta_lines_[li];
         if (y > -line_h && y < meta_h_) {
-            RGB col = COL_TEXT;
+            RGB col = pal.text;
             bool bold = false;
             switch (ml.kind) {
-                case 1: col = COL_ACCENT; bold = true; break;   // section
+                case 1: col = pal.accent; bold = true; break;   // section
                 case 2: col = {0.66, 0.85, 0.55}; bold = true; break; // variable
-                case 3: col = COL_TEXT_DIM; break;              // attribute
+                case 3: col = pal.text_dim; break;              // attribute
                 case 4: col = {0.85, 0.75, 0.55}; break;        // dimension
-                default: col = COL_TEXT; break;
+                default: col = pal.text; break;
             }
             if (ml.kind == 1) {
                 // header underline bar
-                set_color(cr, COL_PANEL2);
+                set_color(cr, pal.panel2);
                 cairo_rectangle(cr, 0, y - 3, meta_w_, line_h + 2);
                 cairo_fill(cr);
             }
@@ -2322,7 +2377,7 @@ void App::draw_meta() {
                 int a = ((int)li == sl0) ? sc0 : 0;
                 int b = ((int)li == sl1) ? sc1 : len;
                 if (b > a) {
-                    set_color(cr, COL_ACCENT, 0.35);
+                    set_color(cr, pal.accent, 0.35);
                     cairo_rectangle(cr, x0 + a * meta_char_w_, y - 2,
                                     (b - a) * meta_char_w_, line_h);
                     cairo_fill(cr);
@@ -2353,7 +2408,7 @@ void App::draw_meta() {
         double bar_h = std::max(24.0, meta_h_ * frac_h);
         double bar_y = meta_h_ * frac_y;
         rounded_rect(cr, meta_w_ - 8, bar_y, 5, bar_h, 2.5);
-        set_color(cr, COL_ACCENT, 0.6);
+        set_color(cr, pal.accent, 0.6);
         cairo_fill(cr);
     }
 
@@ -2468,11 +2523,11 @@ void App::build_ts_cache() {
         ts_cache_w_ = ts_w_; ts_cache_h_ = ts_h_;
     }
     cairo_t *cr = cairo_create(ts_cache_);
-    set_color(cr, COL_BG);
+    set_color(cr, pal.bg);
     cairo_paint(cr);
 
-    draw_text(cr, ts_title_, 16, 12, COL_TEXT, 15, true, PANGO_ALIGN_LEFT, ts_w_ - 32);
-    draw_text(cr, ts_subtitle_, 16, 34, COL_TEXT_DIM, 12, false, PANGO_ALIGN_LEFT,
+    draw_text(cr, ts_title_, 16, 12, pal.text, 15, true, PANGO_ALIGN_LEFT, ts_w_ - 32);
+    draw_text(cr, ts_subtitle_, 16, 34, pal.text_dim, 12, false, PANGO_ALIGN_LEFT,
               ts_w_ - 32);
 
     Rect R{0, 46, (double)ts_w_, (double)ts_h_ - 46};
@@ -2520,7 +2575,7 @@ void App::draw_ts_hover() {
     };
 
     double x = xmap(idx);
-    set_color(cr, COL_TEXT, 0.55);
+    set_color(cr, pal.text, 0.55);
     cairo_set_line_width(cr, 1);
     cairo_move_to(cr, x, ts_geom_.py0); cairo_line_to(cr, x, ts_geom_.py0 + ts_geom_.ph);
     cairo_stroke(cr);
@@ -2552,16 +2607,16 @@ void App::draw_ts_hover() {
     bx = std::clamp(bx, ts_geom_.px0 + 2, ts_geom_.px0 + ts_geom_.pw - bw - 2);
     by = std::clamp(by, ts_geom_.py0 + 2, ts_geom_.py0 + ts_geom_.ph - bh - 2);
 
-    set_color(cr, COL_PANEL2, 0.95);
+    set_color(cr, pal.panel2, 0.95);
     rounded_rect(cr, bx, by, bw, bh, 5);
     cairo_fill(cr);
-    set_color(cr, COL_BORDER);
+    set_color(cr, pal.border);
     cairo_set_line_width(cr, 1);
     rounded_rect(cr, bx, by, bw, bh, 5);
     cairo_stroke(cr);
 
-    draw_text(cr, xl, bx + pad, by + pad, COL_TEXT_DIM, 11);
-    draw_text(cr, yl, bx + pad, by + pad + h1 + 2, COL_TEXT, 12, true);
+    draw_text(cr, xl, bx + pad, by + pad, pal.text_dim, 11);
+    draw_text(cr, yl, bx + pad, by + pad + h1 + 2, pal.text, 12, true);
 }
 
 // Overlay the translucent band of an in-progress span selection.
@@ -2572,10 +2627,10 @@ void App::draw_ts_selection() {
     double b = std::clamp((double)std::max(ts_sel_x0_, ts_sel_x1_),
                           ts_geom_.px0, ts_geom_.px0 + ts_geom_.pw);
     cairo_t *cr = ts_cr_;
-    set_color(cr, COL_ACCENT, 0.18);
+    set_color(cr, pal.accent, 0.18);
     cairo_rectangle(cr, a, ts_geom_.py0, b - a, ts_geom_.ph);
     cairo_fill(cr);
-    set_color(cr, COL_ACCENT, 0.8);
+    set_color(cr, pal.accent, 0.8);
     cairo_set_line_width(cr, 1);
     cairo_move_to(cr, a + 0.5, ts_geom_.py0);
     cairo_line_to(cr, a + 0.5, ts_geom_.py0 + ts_geom_.ph);
@@ -2619,7 +2674,7 @@ void App::draw_series(cairo_t *cr, const Rect &R,
     auto ymap = [&](double val) { return py0 + ph - (val - ymin) / (ymax - ymin) * ph; };
 
     // Plot frame.
-    set_color(cr, COL_PLOTBG);
+    set_color(cr, pal.plotbg);
     cairo_rectangle(cr, px0, py0, pw, ph);
     cairo_fill(cr);
 
@@ -2630,11 +2685,11 @@ void App::draw_series(cairo_t *cr, const Rect &R,
         double f = (double)i / (nyt - 1);
         double val = ymax - f * (ymax - ymin);
         double y = py0 + f * ph;
-        set_color(cr, COL_BORDER, 0.6);
+        set_color(cr, pal.border, 0.6);
         cairo_move_to(cr, px0, y); cairo_line_to(cr, px0 + pw, y);
         cairo_stroke(cr);
         double tw, th; text_size(cr, fmt_num(val), 11, false, tw, th);
-        draw_text(cr, fmt_num(val), px0 - tw - 6, y - th / 2, COL_TEXT_DIM, 11);
+        draw_text(cr, fmt_num(val), px0 - tw - 6, y - th / 2, pal.text_dim, 11);
     }
 
     // X ticks + labels, spread over the samples visible in the window.
@@ -2649,7 +2704,7 @@ void App::draw_series(cairo_t *cr, const Rect &R,
         int idx = (nxt == 1) ? i_lo
                              : i_lo + (int)std::lround((double)i / (nxt - 1) * (i_hi - i_lo));
         double x = xmap(idx);
-        set_color(cr, COL_BORDER, 0.4);
+        set_color(cr, pal.border, 0.4);
         cairo_move_to(cr, x, py0); cairo_line_to(cr, x, py0 + ph);
         cairo_stroke(cr);
         std::string lbl;
@@ -2661,7 +2716,7 @@ void App::draw_series(cairo_t *cr, const Rect &R,
             lbl = std::to_string(idx);
         double tw, th; text_size(cr, lbl, 10, false, tw, th);
         double tx = std::clamp(x - tw / 2, R.x + 2, R.x + R.w - tw - 2);
-        draw_text(cr, lbl, tx, py0 + ph + 6, COL_TEXT_DIM, 10);
+        draw_text(cr, lbl, tx, py0 + ph + 6, pal.text_dim, 10);
     }
 
     // Highlight a current sample, when it lies inside the window.
@@ -2669,7 +2724,7 @@ void App::draw_series(cairo_t *cr, const Rect &R,
         double t = (n > 1) ? (double)cur_idx / (n - 1) : 0.5;
         if (t >= v0 && t <= v1) {
             double x = xmap(cur_idx);
-            set_color(cr, COL_ACCENT, 0.5);
+            set_color(cr, pal.accent, 0.5);
             cairo_set_line_width(cr, 1.5);
             cairo_move_to(cr, x, py0); cairo_line_to(cr, x, py0 + ph);
             cairo_stroke(cr);
@@ -2677,7 +2732,7 @@ void App::draw_series(cairo_t *cr, const Rect &R,
     }
 
     // Axis border.
-    set_color(cr, COL_BORDER);
+    set_color(cr, pal.border);
     cairo_set_line_width(cr, 1);
     cairo_rectangle(cr, px0, py0, pw, ph);
     cairo_stroke(cr);
@@ -2689,7 +2744,7 @@ void App::draw_series(cairo_t *cr, const Rect &R,
     cairo_clip(cr);
 
     // The series line (break across missing values).
-    set_color(cr, COL_ACCENT);
+    set_color(cr, pal.accent);
     cairo_set_line_width(cr, 2);
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
     bool pen = false;
@@ -2706,7 +2761,7 @@ void App::draw_series(cairo_t *cr, const Rect &R,
         for (int i = i_lo; i <= i_hi; ++i) {
             if (std::isnan(yv[i])) continue;
             double x = xmap(i), y = ymap(yv[i]);
-            set_color(cr, i == cur_idx ? RGB{1, 1, 1} : COL_ACCENT);
+            set_color(cr, i == cur_idx ? RGB{1, 1, 1} : pal.accent);
             cairo_arc(cr, x, y, i == cur_idx ? 4 : 2.5, 0, 2 * M_PI);
             cairo_fill(cr);
         }

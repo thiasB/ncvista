@@ -46,7 +46,7 @@ coastline overlay](docs/screenshot.png)
   range and per-slice auto. The **symmetric** button (below it) makes the scale
   symmetric around zero — `[-M, +M]` with `M = max(|min|, |max|)` — which centres
   diverging fields (e.g. anomalies) on zero.
-- Missing/fill values are rendered white.
+- Missing/fill values are rendered white (grey in the light theme).
 - The window opens at a default size whose plot canvas matches a global
   longitude/latitude grid (360 × 180, a 2:1 map); it is freely resizable.
 - **Coastlines overlay** (Natural Earth 110m) for longitude/latitude fields,
@@ -77,6 +77,10 @@ coastline overlay](docs/screenshot.png)
 - Uniformly sized toolbar buttons, each with a hover tooltip describing its
   action. The toolbar file name is ellipsized when it does not fit; hovering over
   a truncated name shows the complete file name (without the folder path).
+- **Dark / light themes**: the `☾ dark` / `☀ light` button at the right end of
+  the toolbar switches the whole UI chrome (windows, sidebar, colorbar,
+  metadata and time-series windows included) between the two palettes; the data
+  colormaps are unaffected.
 - Units are shown verbatim as written in the file's `units` attribute (factor
   order preserved, e.g. `kg m-2`). udunits is still used for time-axis decoding
   for standard/gregorian/proleptic calendars, with arithmetic fallbacks for the
@@ -86,7 +90,7 @@ coastline overlay](docs/screenshot.png)
 - CF packing is unpacked on read: stored values are converted to physical units
   via `scale_factor` / `add_offset`, so the field, the value range and the colour
   scale are all in physical units (fill values are detected before unpacking).
-- `_FillValue` / `missing_value` are rendered white.
+- `_FillValue` / `missing_value` are rendered white (grey in the light theme).
 
 ## Keyboard / mouse
 
@@ -107,6 +111,7 @@ coastline overlay](docs/screenshot.png)
 | Country borders   | `b` or the borders button (geographic data)|
 | Map projection    | `p` or the projection button (geographic data)|
 | Metadata window   | `m` / `i` or the ⓘ metadata button       |
+| Dark / light theme| the ☾/☀ theme button (toolbar right edge) |
 | Select metadata text | drag in the metadata window (copies to clipboard) |
 | Long attributes   | soft-wrap to the window width; resize to reflow |
 | Animation speed   | `+` / `-` or scroll wheel                |
