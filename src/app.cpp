@@ -27,8 +27,10 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <string>
 #include <sys/select.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <vector>
 
@@ -96,6 +98,101 @@ uint32_t missing_pixel() {
     };
     return (0xFFu << 24) | (q(pal.missing.r) << 16) |
            (q(pal.missing.g) << 8) | q(pal.missing.b);
+}
+
+// ---- start-up theme selection ------------------------------------------------
+// A manual choice made with the theme button is persisted to
+// ~/.ncvista/theme and wins on later runs; without it the desktop is probed
+// once — GNOME (gsettings), then KDE (kdeglobals), then $GTK_THEME — and
+// dark remains the fallback.
+static bool ci_contains(const std::string &hay, const char *needle) {
+    auto low = [](std::string s) {
+        for (char &c : s) c = (char)std::tolower((unsigned char)c);
+        return s;
+    };
+    return low(hay).find(low(needle)) != std::string::npos;
+}
+
+static std::string theme_pref_path() {
+    const char *h = std::getenv("HOME");
+    return h ? std::string(h) + "/.ncvista/theme" : std::string();
+}
+
+static void save_theme_pref(bool light) {
+    const std::string path = theme_pref_path();
+    if (path.empty()) return;
+    ::mkdir(path.substr(0, path.find_last_of('/')).c_str(), 0755);  // EEXIST ok
+    if (FILE *f = std::fopen(path.c_str(), "w")) {
+        std::fprintf(f, "%s\n", light ? "light" : "dark");
+        std::fclose(f);
+    }
+}
+
+// The [General] ColorScheme value from KDE's config ("" = no answer).
+static std::string kdeglobals_scheme() {
+    const char *h = std::getenv("HOME");
+    if (!h) return {};
+    std::ifstream in(std::string(h) + "/.config/kdeglobals");
+    if (!in) return {};
+    std::string line;
+    bool gen = false;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line[0] == '[') {
+            if (gen) break;                 // past [General]
+            gen = (line == "[General]");
+            continue;
+        }
+        if (!gen) continue;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = line.substr(0, eq);
+        key.erase(key.find_last_not_of(" \t") + 1);
+        if (key == "ColorScheme") {
+            std::string val = line.substr(eq + 1);
+            val.erase(val.find_last_not_of(" \t\r") + 1);
+            return val;
+        }
+    }
+    return {};
+}
+
+// GNOME's colour-scheme setting via gsettings; false when the tool or the
+// dconf backend is absent (not a GNOME session), so the probe stays silent.
+static bool gsettings_scheme(std::string &val) {
+    FILE *p = popen("gsettings get org.gnome.desktop.interface color-scheme "
+                    "2>/dev/null", "r");
+    if (!p) return false;
+    char buf[256] = {0};
+    bool got = std::fgets(buf, sizeof(buf), p) && buf[0];
+    pclose(p);
+    val = buf;
+    return got;
+}
+
+static bool detect_light_theme() {
+    const std::string path = theme_pref_path();
+    if (!path.empty()) {
+        std::ifstream in(path);
+        std::string s;
+        if (in >> s) {
+            if (s == "light") return true;
+            if (s == "dark") return false;
+        }
+    }
+    std::string v;
+    if (gsettings_scheme(v)) {
+        if (ci_contains(v, "prefer-dark") || ci_contains(v, "\"dark\"") ||
+            ci_contains(v, "'dark'"))
+            return false;
+        if (ci_contains(v, "default") || ci_contains(v, "light"))
+            return true;                    // explicit light preference
+        // "no-preference" or unreadable: fall through to the next probe.
+    }
+    std::string scheme = kdeglobals_scheme();
+    if (!scheme.empty()) return !ci_contains(scheme, "dark");
+    if (const char *g = std::getenv("GTK_THEME"); g && *g)
+        return !ci_contains(g, "dark");
+    return false;                           // dark stays the default
 }
 
 void rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r) {
@@ -1771,6 +1868,7 @@ void App::step_anim(int delta) {
 void App::toggle_theme() {
     light_theme_ = !light_theme_;
     pal = light_theme_ ? THEME_LIGHT : THEME_DARK;
+    save_theme_pref(light_theme_);
     ts_cache_dirty_ = true;
     render();
     if (ts_win_) draw_ts();
@@ -2780,6 +2878,11 @@ void App::draw_plot_line() {
 // ---- main loop -------------------------------------------------------------
 
 int App::run() {
+    // Pick the start-up theme before anything is drawn (persisted choice,
+    // else the desktop probe; see detect_light_theme).
+    light_theme_ = detect_light_theme();
+    pal = light_theme_ ? THEME_LIGHT : THEME_DARK;
+
     dpy_ = XOpenDisplay(nullptr);
     if (!dpy_) {
         std::fprintf(stderr, "ncvista: cannot open X display (is $DISPLAY set?)\n");

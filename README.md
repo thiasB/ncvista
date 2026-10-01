@@ -80,7 +80,10 @@ coastline overlay](docs/screenshot.png)
 - **Dark / light themes**: the `☾ dark` / `☀ light` button at the right end of
   the toolbar switches the whole UI chrome (windows, sidebar, colorbar,
   metadata and time-series windows included) between the two palettes; the data
-  colormaps are unaffected.
+  colormaps are unaffected. At start-up ncvista follows the desktop's
+  colour-scheme preference (GNOME `gsettings`, then KDE `kdeglobals`, then
+  `$GTK_THEME`); a manual choice is remembered in `~/.ncvista/theme` and takes
+  precedence on later runs.
 - Units are shown verbatim as written in the file's `units` attribute (factor
   order preserved, e.g. `kg m-2`). udunits is still used for time-axis decoding
   for standard/gregorian/proleptic calendars, with arithmetic fallbacks for the
