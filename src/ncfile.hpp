@@ -77,7 +77,9 @@ public:
                                     int yi, int xi) const;
 
     // Return values of the 1-D coordinate variable that shares a dimension's
-    // name (e.g. "lat", "time"). Empty if none exists or unreadable.
+    // name (e.g. "lat", "time"), unpacked to physical units via CF packing
+    // attributes if present; _FillValue/missing_value become NaN.
+    // Empty if none exists or unreadable.
     std::vector<double> coord_values(int dimid) const;
 
     // The units string of the coordinate variable for a dimension (if any).

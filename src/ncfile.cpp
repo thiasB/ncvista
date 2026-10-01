@@ -224,6 +224,20 @@ std::vector<double> NcFile::coord_values(int dimid) const {
     if (vndims != 1) return {};
     std::vector<double> out(d.len);
     if (nc_get_var_double(ncid_, vid, out.data()) != NC_NOERR) return {};
+    // Apply the same CF semantics as the field readers: coordinate variables
+    // may carry scale_factor/add_offset too, and their _FillValue (checked in
+    // the stored domain, before unpacking) is marked as NaN.
+    const NcVar *cv = nullptr;
+    for (const auto &var : vars_)
+        if (var.id == vid) { cv = &var; break; }
+    if (cv && cv->has_fill)
+        for (double &x : out)
+            if (x == cv->fill ||
+                std::fabs(x - cv->fill) <= 1e-6 * std::fabs(cv->fill))
+                x = std::numeric_limits<double>::quiet_NaN();
+    if (cv && cv->packed)
+        for (double &x : out)
+            if (!std::isnan(x)) x = x * cv->scale + cv->offset;
     return out;
 }
 
