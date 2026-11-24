@@ -63,7 +63,10 @@ coastline overlay](docs/screenshot.png)
   position, plus a crosshair.
 - **Time-series window**: click a grid cell in the plot to open a line chart of
   that cell's series along the time axis, at the currently selected vertical
-  level (and other fixed dimensions). The x-axis uses udunits calendar dates, the
+  level (and other fixed dimensions). When the selected variable lives on a
+  single-cell grid (both map axes, typically lat and lon, have length 1), this
+  window opens automatically at start-up — the field plot would show just one
+  pixel. The x-axis uses udunits calendar dates, the
   current frame is highlighted, and the unit is shown in the title. Drag
   horizontally over the chart to zoom into that time span (axis ticks and the
   hover readout follow the selection); right-click restores the full range. For

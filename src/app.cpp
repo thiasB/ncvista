@@ -535,6 +535,7 @@ private:
     void compute_range();
     void apply_symmetric();            // force [-M, +M] with M = max(|lo|,|hi|)
     int time_dim_pos() const;          // dim position that is a time axis, or -1
+    bool single_cell() const;          // display grid is 1x1: series view is better
 
     void layout();
     void render();
@@ -580,6 +581,15 @@ int App::time_dim_pos() const {
         if (units_.is_time(u)) return p;
     }
     return -1;
+}
+
+// True when the current variable's display grid is a single cell — both map
+// axes (typically lat and lon) have length 1. The field plot would show one
+// pixel, so such variables are better browsed as a series over time or level.
+bool App::single_cell() const {
+    if (cur_var_ < 0 || ydim_ < 0 || xdim_ < 0) return false;
+    return nc_.dim(cur().dimids[ydim_]).len == 1 &&
+           nc_.dim(cur().dimids[xdim_]).len == 1;
 }
 
 void App::select_var(int vidx) {
@@ -2933,6 +2943,11 @@ int App::run() {
                                       width_, height_);
     front_cr_ = cairo_create(surf_);
     make_back_buffer();
+
+    // A single-cell grid (lat=lon=1) would show as one pixel in the field
+    // plot: land on its time series straight away instead of making the user
+    // click the cell first. No-op when the variable has no scan dimension.
+    if (single_cell()) open_ts_window(0, 0);
 
     int fd = ConnectionNumber(dpy_);
     bool running = true;
