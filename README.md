@@ -24,7 +24,14 @@ coastline overlay](docs/screenshot.png)
   directories and remote/S3 URLs). See [Usage](#usage).
 - 2-D field rendering of the last two dimensions, aspect-ratio preserved.
 - 1-D variables are shown as a line plot filling the main window (the same chart
-  as the time-series window), with a calendar/numeric x-axis.
+  as the time-series window), with a calendar/numeric x-axis. **Single-cell
+  grids** — variables whose grid is one cell across (lat = lon = 1, e.g. station
+  or buoy data) — use that same chart instead of a one-pixel map: it shows the
+  series along the remaining dimension (time, or the first extra dimension), the
+  time slider and playback controls move a marker through it, hovering reads out
+  samples, dragging horizontally zooms into a span, and right-click resets. Any
+  further extra dimensions (e.g. a level axis) stay available as sliders that
+  re-slice the series.
 - **Zoom & pan**: drag a rectangle over the plot to zoom into that region (the
   coastline overlay and hover readout follow); right-click to reset. When zoomed,
   pan with the scrollbars along the plot edges, or with the mouse wheel (vertical,
@@ -63,10 +70,7 @@ coastline overlay](docs/screenshot.png)
   position, plus a crosshair.
 - **Time-series window**: click a grid cell in the plot to open a line chart of
   that cell's series along the time axis, at the currently selected vertical
-  level (and other fixed dimensions). When the selected variable lives on a
-  single-cell grid (both map axes, typically lat and lon, have length 1), this
-  window opens automatically at start-up — the field plot would show just one
-  pixel. The x-axis uses udunits calendar dates, the
+  level (and other fixed dimensions). The x-axis uses udunits calendar dates, the
   current frame is highlighted, and the unit is shown in the title. Drag
   horizontally over the chart to zoom into that time span (axis ticks and the
   hover readout follow the selection); right-click restores the full range. For
@@ -125,8 +129,8 @@ coastline overlay](docs/screenshot.png)
 | Move a dimension  | drag the slider                          |
 | Inspect a cell    | hover the plot                           |
 | Cell time series  | click a cell in the plot                 |
-| Zoom a time span  | drag horizontally in the time-series chart |
-| Reset time zoom   | right-click the time-series chart        |
+| Zoom a time span  | drag horizontally in the chart (time-series window or single-cell series view) |
+| Reset time zoom   | right-click the chart                    |
 | Zoom into region  | drag a rectangle over the plot           |
 | Pan (when zoomed) | wheel / Shift+wheel, or drag the plot scrollbars |
 | Reset zoom        | right-click the plot                     |

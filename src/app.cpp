@@ -469,7 +469,6 @@ private:
     void build_ts_cache();             // (re)render the static chart into ts_cache_
     void draw_ts_hover();              // overlay cursor line + bubble for ts_hover_idx_
     void draw_ts_selection();          // rubber-band overlay during a span drag
-    int ts_sample_at_x(int mx) const;  // nearest global sample under a pixel
 
     // Reusable line-chart renderer (used by the time-series window and by the
     // main plot when the current variable is 1-D). [v0, v1] is the
@@ -481,6 +480,28 @@ private:
                      double ymin, double ymax, bool is_time,
                      const std::string &xunits, const std::string &xcal, int cur_idx,
                      double v0, double v1, SeriesGeom &g);
+
+    // Line-chart interaction helpers shared by the time-series window and the
+    // single-cell series view in the main window. g is the geometry recorded
+    // by the last draw_series() for that chart.
+    int sample_at_x(const SeriesGeom &g, int mx) const;
+    void draw_hover_overlay(cairo_t *cr, const SeriesGeom &g,
+                            const std::vector<double> &xv,
+                            const std::vector<double> &yv,
+                            double ymin, double ymax, bool is_time,
+                            const std::string &xunits, const std::string &xcal,
+                            int idx);
+    void draw_span_band(cairo_t *cr, const SeriesGeom &g, int x0, int x1);
+
+    // Single-cell variable (all non-scan dims length 1, typically lat=lon=1):
+    // the scan dim is charted in the main window instead of a one-pixel field.
+    bool series_mode_ = false;
+    SeriesGeom line_geom_;             // chart geometry written by draw_series
+    int line_hover_ = -1;              // sample under the pointer (-1 = none)
+    double line_v0_ = 0, line_v1_ = 1; // x-axis zoom as an index-fraction range
+    bool line_selecting_ = false;      // horizontal span drag in progress
+    int line_sel_x0_ = 0, line_sel_x1_ = 0;
+    void end_line_selection(int x, int y);
 
     // ---- 1-D variable shown as a line plot in the main window ------------
     std::vector<double> line_vals_, line_x_;
@@ -535,7 +556,6 @@ private:
     void compute_range();
     void apply_symmetric();            // force [-M, +M] with M = max(|lo|,|hi|)
     int time_dim_pos() const;          // dim position that is a time axis, or -1
-    bool single_cell() const;          // display grid is 1x1: series view is better
 
     void layout();
     void render();
@@ -583,20 +603,12 @@ int App::time_dim_pos() const {
     return -1;
 }
 
-// True when the current variable's display grid is a single cell — both map
-// axes (typically lat and lon) have length 1. The field plot would show one
-// pixel, so such variables are better browsed as a series over time or level.
-bool App::single_cell() const {
-    if (cur_var_ < 0 || ydim_ < 0 || xdim_ < 0) return false;
-    return nc_.dim(cur().dimids[ydim_]).len == 1 &&
-           nc_.dim(cur().dimids[xdim_]).len == 1;
-}
-
 void App::select_var(int vidx) {
     cur_var_ = vidx;
     const NcVar &v = cur();
     fixed_.assign(v.ndims, 0);
     zoomed_ = false; selecting_ = false;   // a different grid: start unzoomed
+    series_mode_ = false; line_selecting_ = false;
     editing_ = 0;
 
     // A 1-D variable is shown as a line plot rather than a 2-D field.
@@ -674,6 +686,19 @@ void App::select_var(int vidx) {
         for (int p = 0; p < v.ndims; ++p)
             if (p != ydim_ && p != xdim_) { anim_dim_ = p; break; }
 
+    // A grid that is a single cell across — only the scan dimension has extent,
+    // typically lat = lon = 1 (station / buoy data): the field plot would show
+    // one pixel, so chart the scan dimension in its place instead (time series
+    // in the main window; sliders and playback move the chart's marker).
+    if (nc_.dim(v.dimids[ydim_]).len == 1 && nc_.dim(v.dimids[xdim_]).len == 1 &&
+        anim_dim_ >= 0) {
+        series_mode_ = true;
+        geographic_ = false;
+        line_v0_ = 0; line_v1_ = 1; line_hover_ = -1; line_selecting_ = false;
+        setup_line();
+        return;
+    }
+
     // Geographic axes (a prerequisite for the coastline overlay) require both
     // an identified lon/lat pair and usable coordinate values.
     geographic_ = geo_pair && !xcoord_.empty() && !ycoord_.empty();
@@ -710,11 +735,17 @@ void App::reload_slice() {
     if (auto_range_) compute_range();
 }
 
-// Read a 1-D variable into a series plotted as a line in the main window.
+// Read the series plotted as a line in the main window: for a 1-D variable
+// the whole variable along its single dimension; for a single-cell series-mode
+// variable the scan-dim slice through its one cell (other extra dimensions
+// stay fixed at their slider positions, so a slider move re-runs this).
 void App::setup_line() {
     const NcVar &v = cur();
-    line_vals_ = nc_.read_series(v, fixed_, 0, 0, 0, -1, -1); // whole var along dim 0
-    int d = v.dimids[0];
+    int sp = series_mode_ ? anim_dim_ : 0;
+    line_vals_ = nc_.read_series(v, fixed_, sp, 0, 0,
+                                 series_mode_ ? ydim_ : -1,
+                                 series_mode_ ? xdim_ : -1);
+    int d = v.dimids[sp];
     line_x_ = nc_.coord_values(d);
     line_xunits_ = nc_.coord_units(d);
     line_xcal_ = nc_.coord_calendar(d);
@@ -828,12 +859,13 @@ void App::layout() {
     // Bottom area: dimension sliders. The playback buttons sit in the left
     // gutter of the time slider's row (no time axis -> a small button strip).
     // A 1-D variable (line plot) has no sliders, colour scale or playback, so
-    // the plot uses the full content area.
+    // the plot uses the full content area. A single-cell series keeps sliders
+    // and playback (they drive the chart's marker) but drops the colour scale.
     const NcVar *v = cur_var_ >= 0 ? &cur() : nullptr;
     bool line_mode = v && v->ndims == 1;
     int nslid = v ? std::max(0, v->ndims - 2) : 0;
     double slider_area = line_mode ? 0.0 : (nslid > 0 ? (nslid * 34 + 16) : CONTROLS_H);
-    double colorbar_w = line_mode ? 0.0 : COLORBAR_W;  // editable bound fields
+    double colorbar_w = (line_mode || series_mode_) ? 0.0 : COLORBAR_W;
 
     r_colorbar_ = {cx + cw - colorbar_w, cy, colorbar_w, ch - slider_area};
     r_plot_ = {cx, cy, cw - colorbar_w - (colorbar_w > 0 ? pad : 0), ch - slider_area};
@@ -1279,9 +1311,11 @@ void App::draw_plot() {
     draw_text(cr_, head + un, r_header_.x + 4, r_header_.y + 5, pal.text, 15, true,
               PANGO_ALIGN_LEFT, r_header_.w);
 
-    // 1-D variables are drawn as a line plot rather than a 2-D field.
-    if (v.ndims == 1) {
+    // 1-D variables (and single-cell series-mode variables) are drawn as a
+    // line plot rather than a 2-D field.
+    if (v.ndims == 1 || series_mode_) {
         plot_s_ = 0; plot_nx_ = plot_ny_ = 0;   // disable field click/hover targets
+        r_plot_vsb_ = r_plot_hsb_ = Rect{};     // (incl. stale pan-scrollbars)
         draw_plot_line();
         return;
     }
@@ -1879,7 +1913,9 @@ void App::step_anim(int delta) {
     long n = (long)fixed_[anim_dim_] + delta;
     n = ((n % (long)len) + (long)len) % (long)len;
     fixed_[anim_dim_] = (size_t)n;
-    reload_slice();
+    // In series mode the charted values do not change — the marker reads the
+    // new index straight from fixed_ — so there is no slice to reload.
+    if (!series_mode_) reload_slice();
 }
 
 // Swap the UI palette and repaint every window. The cached time-series chart
@@ -1895,9 +1931,10 @@ void App::toggle_theme() {
 }
 
 void App::on_button(int bx, int by, int button) {
-    // Right button resets any zoom.
+    // Right button resets any zoom (field or series chart).
     if (button == Button3) {
         if (zoomed_) zoomed_ = false;
+        if (series_mode_) { line_v0_ = 0; line_v1_ = 1; }
         return;
     }
     if (button == Button1) {
@@ -1933,7 +1970,10 @@ void App::on_button(int bx, int by, int button) {
 
         if (r_first_.hit(bx, by)) {
             playing_ = false;
-            if (anim_dim_ >= 0 && fixed_[anim_dim_] != 0) { fixed_[anim_dim_] = 0; reload_slice(); }
+            if (anim_dim_ >= 0 && fixed_[anim_dim_] != 0) {
+                fixed_[anim_dim_] = 0;
+                if (!series_mode_) reload_slice();
+            }
             return;
         }
         if (r_play_.hit(bx, by)) { playing_ = !playing_; last_frame_ = now_seconds(); return; }
@@ -2017,6 +2057,22 @@ void App::on_button(int bx, int by, int button) {
                          GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
             return;
         }
+        // Series-mode chart: press starts a horizontal span selection — a real
+        // drag zooms into that index range, a click scrubs the marker to the
+        // sample under it (right button resets the zoom; see end_line_selection).
+        if (series_mode_ && line_geom_.n > 1 && line_geom_.pw > 0 &&
+            bx >= line_geom_.px0 - 4 && bx <= line_geom_.px0 + line_geom_.pw + 4 &&
+            by >= line_geom_.py0 && by <= line_geom_.py0 + line_geom_.ph) {
+            line_selecting_ = true;
+            line_hover_ = -1;
+            line_sel_x0_ = line_sel_x1_ =
+                (int)std::clamp((double)bx, line_geom_.px0,
+                                line_geom_.px0 + line_geom_.pw);
+            XGrabPointer(dpy_, win_, False,
+                         ButtonReleaseMask | PointerMotionMask,
+                         GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+            return;
+        }
     }
 }
 
@@ -2053,6 +2109,31 @@ void App::end_selection(int x, int y) {
     zoomed_ = true;
 }
 
+// Finish a span drag on the main-window series chart: a real drag zooms into
+// the selected index range; a click scrubs the playback marker onto the
+// sample under the pointer.
+void App::end_line_selection(int x, int y) {
+    line_selecting_ = false;
+    const SeriesGeom &g = line_geom_;
+    if (g.n <= 1 || g.pw <= 0) return;
+    auto cl = [&](double px) { return std::clamp(px, g.px0, g.px0 + g.pw); };
+    double a = cl(std::min((double)line_sel_x0_, (double)x));
+    double b = cl(std::max((double)line_sel_x0_, (double)x));
+    auto t_at = [&](double px) {
+        double f = std::clamp((px - g.px0) / g.pw, 0.0, 1.0);
+        return g.v0 + f * (g.v1 - g.v0);
+    };
+    if (b - a >= 5) {
+        double w0 = t_at(a), w1 = t_at(b);
+        if (w1 - w0 >= 1.5 / (g.n - 1)) { line_v0_ = w0; line_v1_ = w1; }
+    } else if (anim_dim_ >= 0 && anim_dim_ < (int)fixed_.size()) {
+        double t = t_at(cl((double)x));
+        long idx = std::lround(t * (g.n - 1));
+        fixed_[anim_dim_] = (size_t)std::clamp(idx, 0L, (long)g.n - 1);
+    }
+    (void)y;
+}
+
 // Shift the zoom window by (dx, dy) fractions, keeping its size and staying
 // within the full field.
 void App::pan_zoom(double dx, double dy) {
@@ -2084,11 +2165,26 @@ void App::plot_scroll_to(double mx, double my, int axis) {
 // highlight) would look different. Motion over dead areas is then free.
 bool App::motion_needs_render() {
     // Drags and the rubber-band selection track the pointer continuously.
-    if (selecting_ || drag_sidebar_ || plot_sb_drag_ || drag_slider_ >= 0)
+    if (selecting_ || line_selecting_ || drag_sidebar_ || plot_sb_drag_ ||
+        drag_slider_ >= 0)
         return true;
 
     uint64_t sig = 0xcbf29ce484222325ull;                    // FNV-1a
     auto mix = [&sig](uint64_t v) { sig = (sig ^ v) * 0x100000001b3ull; };
+
+    // Series-mode chart: hover cursor and playback marker. The bubble is
+    // anchored to the sample, so the sample index (not the pixel) identifies it.
+    if (series_mode_) {
+        int idx = -1;
+        if (line_geom_.n > 0 && line_geom_.pw > 0 &&
+            mouse_x_ >= line_geom_.px0 - 4 && mouse_x_ <= line_geom_.px0 + line_geom_.pw + 4 &&
+            mouse_y_ >= line_geom_.py0 && mouse_y_ <= line_geom_.py0 + line_geom_.ph)
+            idx = sample_at_x(line_geom_, (int)mouse_x_);
+        line_hover_ = idx;                                   // drawn by draw_plot_line
+        mix(7); mix((uint64_t)(int64_t)idx);
+        if (anim_dim_ >= 0 && anim_dim_ < (int)fixed_.size())
+            mix((uint64_t)fixed_[anim_dim_]);
+    }
 
     // Crosshair + cell readout follow the pointer pixel-exactly inside the
     // field image (equirectangular mode only; plot_s_ is 0 when projected).
@@ -2137,6 +2233,11 @@ void App::on_motion(int mx, int my) {
     mouse_x_ = mx; mouse_y_ = my;
     if (plot_sb_drag_) { plot_scroll_to(mx, my, plot_sb_drag_); return; }
     if (drag_sidebar_) { set_sidebar_scroll_from_y(my); return; }
+    if (line_selecting_ && line_geom_.pw > 0) {
+        line_sel_x1_ = (int)std::clamp((double)mx, line_geom_.px0,
+                                       line_geom_.px0 + line_geom_.pw);
+        return;
+    }
     if (drag_slider_ >= 0 && drag_slider_ < (int)sliders_.size()) {
         const SliderUI &sl = sliders_[drag_slider_];
         int p = sl.dimpos;
@@ -2147,7 +2248,13 @@ void App::on_motion(int mx, int my) {
         double frac = (mx - sl.track.x) / sl.track.w;
         frac = std::clamp(frac, 0.0, 1.0);
         size_t idx = (size_t)std::lround(frac * (len - 1));
-        if (idx != fixed_[p]) { fixed_[p] = idx; reload_slice(); }
+        if (idx != fixed_[p]) {
+            fixed_[p] = idx;
+            // Series mode: the scan dim only moves the marker (the charted
+            // values are unchanged); another extra dim re-slices the series.
+            if (series_mode_) { if (p != anim_dim_) setup_line(); }
+            else reload_slice();
+        }
     }
 }
 
@@ -2158,7 +2265,10 @@ void App::on_key(KeySym ks) {
         case XK_Left:  playing_ = false; step_anim(-1); break;
         case XK_Home:
             playing_ = false;
-            if (anim_dim_ >= 0 && fixed_[anim_dim_] != 0) { fixed_[anim_dim_] = 0; reload_slice(); }
+            if (anim_dim_ >= 0 && fixed_[anim_dim_] != 0) {
+                fixed_[anim_dim_] = 0;
+                if (!series_mode_) reload_slice();
+            }
             break;
         case XK_Up: {
             const auto &d = nc_.displayable();
@@ -2676,29 +2786,39 @@ void App::draw_ts() {
 // Drawn straight onto the window over the blitted cache, using the plot geometry
 // recorded by the last build_ts_cache().
 void App::draw_ts_hover() {
-    cairo_t *cr = ts_cr_;
-    int n = ts_geom_.n, idx = ts_hover_idx_;
-    if (idx < 0 || idx >= n || ts_geom_.pw <= 0 || ts_ymax_ <= ts_ymin_) return;
+    draw_hover_overlay(ts_cr_, ts_geom_, ts_x_, ts_vals_, ts_ymin_, ts_ymax_,
+                       ts_is_time_, ts_xunits_, ts_xcal_, ts_hover_idx_);
+}
+
+// Cursor line, point marker and value bubble for the hovered sample of a
+// line chart. Shared by the time-series window and the main-window series.
+void App::draw_hover_overlay(cairo_t *cr, const SeriesGeom &g,
+                             const std::vector<double> &xv,
+                             const std::vector<double> &yv,
+                             double ymin, double ymax, bool is_time,
+                             const std::string &xunits, const std::string &xcal,
+                             int idx) {
+    int n = g.n;
+    if (idx < 0 || idx >= n || g.pw <= 0 || ymax <= ymin) return;
     double t = (n > 1) ? (double)idx / (n - 1) : 0.5;
-    if (t < ts_geom_.v0 - 1e-9 || t > ts_geom_.v1 + 1e-9) return;  // zoomed away
+    if (t < g.v0 - 1e-9 || t > g.v1 + 1e-9) return;    // zoomed away
 
     auto xmap = [&](int i) {
         double t = (n > 1) ? (double)i / (n - 1) : 0.5;
-        return ts_geom_.px0 +
-               (t - ts_geom_.v0) / (ts_geom_.v1 - ts_geom_.v0) * ts_geom_.pw;
+        return g.px0 + (t - g.v0) / (g.v1 - g.v0) * g.pw;
     };
     auto ymap = [&](double v) {
-        return ts_geom_.py0 + ts_geom_.ph - (v - ts_ymin_) / (ts_ymax_ - ts_ymin_) * ts_geom_.ph;
+        return g.py0 + g.ph - (v - ymin) / (ymax - ymin) * g.ph;
     };
 
     double x = xmap(idx);
     set_color(cr, pal.text, 0.55);
     cairo_set_line_width(cr, 1);
-    cairo_move_to(cr, x, ts_geom_.py0); cairo_line_to(cr, x, ts_geom_.py0 + ts_geom_.ph);
+    cairo_move_to(cr, x, g.py0); cairo_line_to(cr, x, g.py0 + g.ph);
     cairo_stroke(cr);
 
-    bool has = idx < (int)ts_vals_.size() && !std::isnan(ts_vals_[idx]);
-    double y = has ? ymap(ts_vals_[idx]) : ts_geom_.py0 + ts_geom_.ph / 2;
+    bool has = idx < (int)yv.size() && !std::isnan(yv[idx]);
+    double y = has ? ymap(yv[idx]) : g.py0 + g.ph / 2;
     if (has) {
         set_color(cr, RGB{1, 1, 1});
         cairo_arc(cr, x, y, 3.5, 0, 2 * M_PI);
@@ -2706,23 +2826,23 @@ void App::draw_ts_hover() {
     }
 
     std::string xl;
-    if (ts_is_time_ && idx < (int)ts_x_.size())
-        xl = units_.format_time(ts_xunits_, ts_xcal_, ts_x_[idx]);
-    else if (idx < (int)ts_x_.size())
-        xl = fmt_num(ts_x_[idx]);
+    if (is_time && idx < (int)xv.size())
+        xl = units_.format_time(xunits, xcal, xv[idx]);
+    else if (idx < (int)xv.size())
+        xl = fmt_num(xv[idx]);
     else
         xl = std::to_string(idx);
-    std::string yl = has ? fmt_num(ts_vals_[idx]) : std::string("missing");
+    std::string yl = has ? fmt_num(yv[idx]) : std::string("missing");
 
     double w1, h1, w2, h2;
     text_size(cr, xl, 11, false, w1, h1);
     text_size(cr, yl, 12, true, w2, h2);
     double pad = 7;
     double bw = std::max(w1, w2) + 2 * pad, bh = h1 + h2 + 2 * pad + 2;
-    double bx = x + 12, by = (has ? y : ts_geom_.py0 + 10) - bh / 2;
-    if (bx + bw > ts_geom_.px0 + ts_geom_.pw) bx = x - 12 - bw;   // flip left near right edge
-    bx = std::clamp(bx, ts_geom_.px0 + 2, ts_geom_.px0 + ts_geom_.pw - bw - 2);
-    by = std::clamp(by, ts_geom_.py0 + 2, ts_geom_.py0 + ts_geom_.ph - bh - 2);
+    double bx = x + 12, by = (has ? y : g.py0 + 10) - bh / 2;
+    if (bx + bw > g.px0 + g.pw) bx = x - 12 - bw;      // flip left near right edge
+    bx = std::clamp(bx, g.px0 + 2, g.px0 + g.pw - bw - 2);
+    by = std::clamp(by, g.py0 + 2, g.py0 + g.ph - bh - 2);
 
     set_color(cr, pal.panel2, 0.95);
     rounded_rect(cr, bx, by, bw, bh, 5);
@@ -2738,32 +2858,33 @@ void App::draw_ts_hover() {
 
 // Overlay the translucent band of an in-progress span selection.
 void App::draw_ts_selection() {
-    if (ts_geom_.pw <= 0 || ts_geom_.ph <= 0) return;
-    double a = std::clamp((double)std::min(ts_sel_x0_, ts_sel_x1_),
-                          ts_geom_.px0, ts_geom_.px0 + ts_geom_.pw);
-    double b = std::clamp((double)std::max(ts_sel_x0_, ts_sel_x1_),
-                          ts_geom_.px0, ts_geom_.px0 + ts_geom_.pw);
-    cairo_t *cr = ts_cr_;
+    draw_span_band(ts_cr_, ts_geom_, ts_sel_x0_, ts_sel_x1_);
+}
+
+void App::draw_span_band(cairo_t *cr, const SeriesGeom &g, int x0, int x1) {
+    if (g.pw <= 0 || g.ph <= 0) return;
+    double a = std::clamp((double)std::min(x0, x1), g.px0, g.px0 + g.pw);
+    double b = std::clamp((double)std::max(x0, x1), g.px0, g.px0 + g.pw);
     set_color(cr, pal.accent, 0.18);
-    cairo_rectangle(cr, a, ts_geom_.py0, b - a, ts_geom_.ph);
+    cairo_rectangle(cr, a, g.py0, b - a, g.ph);
     cairo_fill(cr);
     set_color(cr, pal.accent, 0.8);
     cairo_set_line_width(cr, 1);
-    cairo_move_to(cr, a + 0.5, ts_geom_.py0);
-    cairo_line_to(cr, a + 0.5, ts_geom_.py0 + ts_geom_.ph);
-    cairo_move_to(cr, b - 0.5, ts_geom_.py0);
-    cairo_line_to(cr, b - 0.5, ts_geom_.py0 + ts_geom_.ph);
+    cairo_move_to(cr, a + 0.5, g.py0);
+    cairo_line_to(cr, a + 0.5, g.py0 + g.ph);
+    cairo_move_to(cr, b - 0.5, g.py0);
+    cairo_line_to(cr, b - 0.5, g.py0 + g.ph);
     cairo_stroke(cr);
 }
 
 // The nearest sample (global index) under a window x pixel, honouring the
 // current zoom window. -1 when no chart is drawn yet.
-int App::ts_sample_at_x(int mx) const {
-    if (ts_geom_.n <= 0 || ts_geom_.pw <= 0) return -1;
-    double f = std::clamp((double)(mx - ts_geom_.px0) / ts_geom_.pw, 0.0, 1.0);
-    double t = ts_geom_.v0 + f * (ts_geom_.v1 - ts_geom_.v0);
-    int idx = (ts_geom_.n > 1) ? (int)std::lround(t * (ts_geom_.n - 1)) : 0;
-    return std::clamp(idx, 0, ts_geom_.n - 1);
+int App::sample_at_x(const SeriesGeom &g, int mx) const {
+    if (g.n <= 0 || g.pw <= 0) return -1;
+    double f = std::clamp((double)(mx - g.px0) / g.pw, 0.0, 1.0);
+    double t = g.v0 + f * (g.v1 - g.v0);
+    int idx = (g.n > 1) ? (int)std::lround(t * (g.n - 1)) : 0;
+    return std::clamp(idx, 0, g.n - 1);
 }
 
 // Draw a line chart of (xv, yv) within rectangle R. cur_idx (>= 0) highlights a
@@ -2886,12 +3007,26 @@ void App::draw_series(cairo_t *cr, const Rect &R,
     cairo_restore(cr);
 }
 
-// The main-window line plot for a 1-D variable.
+// The main-window line plot: a 1-D variable (static chart), or the scan-dim
+// series of a single-cell variable — then the playback marker tracks the
+// slider, the pointer gets a hover readout, and a horizontal drag zooms.
 void App::draw_plot_line() {
-    SeriesGeom lg;    // nothing hit-tests the main-window line plot; keep its
-                      // geometry out of an open time-series window's copy
+    SeriesGeom local;   // the 1-D chart is not hit-tested; keep its geometry out
+                        // of an open time-series window's copy
+    SeriesGeom &g = series_mode_ ? line_geom_ : local;
+    int cur_idx = -1;
+    double v0 = 0, v1 = 1;
+    if (series_mode_) {
+        if (anim_dim_ >= 0 && anim_dim_ < (int)fixed_.size())
+            cur_idx = (int)fixed_[anim_dim_];
+        v0 = line_v0_; v1 = line_v1_;
+    }
     draw_series(cr_, r_plot_, line_x_, line_vals_, line_ymin_, line_ymax_,
-                line_is_time_, line_xunits_, line_xcal_, -1, 0.0, 1.0, lg);
+                line_is_time_, line_xunits_, line_xcal_, cur_idx, v0, v1, g);
+    if (!series_mode_) return;
+    if (line_selecting_) draw_span_band(cr_, line_geom_, line_sel_x0_, line_sel_x1_);
+    draw_hover_overlay(cr_, line_geom_, line_x_, line_vals_, line_ymin_, line_ymax_,
+                       line_is_time_, line_xunits_, line_xcal_, line_hover_);
 }
 
 // ---- main loop -------------------------------------------------------------
@@ -2943,11 +3078,6 @@ int App::run() {
                                       width_, height_);
     front_cr_ = cairo_create(surf_);
     make_back_buffer();
-
-    // A single-cell grid (lat=lon=1) would show as one pixel in the field
-    // plot: land on its time series straight away instead of making the user
-    // click the cell first. No-op when the variable has no scan dimension.
-    if (single_cell()) open_ts_window(0, 0);
 
     int fd = ConnectionNumber(dpy_);
     bool running = true;
@@ -3136,7 +3266,7 @@ int App::run() {
                         if (ts_geom_.n > 0 && ts_geom_.pw > 0 &&
                             mx >= ts_geom_.px0 - 4 && mx <= ts_geom_.px0 + ts_geom_.pw + 4 &&
                             my >= ts_geom_.py0 && my <= ts_geom_.py0 + ts_geom_.ph)
-                            idx = ts_sample_at_x(mx);
+                            idx = sample_at_x(ts_geom_, mx);
                         if (idx != ts_hover_idx_) { ts_hover_idx_ = idx; draw_ts(); }
                         break;
                     }
@@ -3204,6 +3334,10 @@ int App::run() {
                         XUngrabPointer(dpy_, CurrentTime);  // pair of the grab
                         end_selection(ev.xbutton.x, ev.xbutton.y);
                         render();
+                    } else if (ev.xbutton.button == Button1 && line_selecting_) {
+                        XUngrabPointer(dpy_, CurrentTime);  // pair of the grab
+                        end_line_selection(ev.xbutton.x, ev.xbutton.y);
+                        render();
                     }
                     break;
                 case MotionNotify: {
@@ -3222,8 +3356,8 @@ int App::run() {
                     // The synthetic crossings around a pointer grab (the
                     // rubber-band drag grabs) are not real leaves.
                     if (ev.xcrossing.mode != NotifyNormal) break;
-                    if (selecting_ || drag_sidebar_ || plot_sb_drag_ ||
-                        drag_slider_ >= 0) break;          // drags keep tracking
+                    if (selecting_ || line_selecting_ || drag_sidebar_ ||
+                        plot_sb_drag_ || drag_slider_ >= 0) break;  // drags keep tracking
                     // Drop the hover readout/crosshair: with the pointer gone no
                     // further motion arrives, so they would otherwise freeze at
                     // the edge and be redrawn on every animation frame.
